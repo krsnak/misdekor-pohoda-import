@@ -49,7 +49,7 @@ def main() -> None:
   xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd"
   id="MISDEKOR_IMPORT"
   version="2.0"
-  ico=""
+  ico="12345678"
   application="misdekor-import"
   note="Import objednávek z Eshop-rychle">
 
