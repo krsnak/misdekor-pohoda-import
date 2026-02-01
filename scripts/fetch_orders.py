@@ -39,7 +39,8 @@ def main() -> None:
     # API obvykle vrací objekt s klíčem jako "order_list" nebo přímo seznam.
     # Zkusíme obě varianty bezpečně.
     if isinstance(data, dict):
-        orders = data.get("order_list") or data.get("orders") or []
+        orders = (data.get("params", {}) or {}).get("orderList", [])
+
     elif isinstance(data, list):
         orders = data
     else:
