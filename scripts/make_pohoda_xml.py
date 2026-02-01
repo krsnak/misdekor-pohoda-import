@@ -1,89 +1,105 @@
 import json
 import os
-from datetime import datetime
-from xml.sax.saxutils import escape
+import time
+import urllib.request
+from urllib.error import URLError
+import socket
 
-INPUT = "output/new_orders.json"
-OUTPUT = "output/pohoda.xml"
+# --- Force IPv4 (GitHub Actions někdy selže na IPv6 trase) --------------------
+socket.setdefaulttimeout(30)
+
+_orig_getaddrinfo = socket.getaddrinfo
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    # vždy vracej jen IPv4 adresy
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = _getaddrinfo_ipv4
+# -----------------------------------------------------------------------------
+
+BASE_URL = "https://www.misdekor.cz/request.php?action=GetOrders&version=v2.0&password="
+
+STATE_PATH = "state.json"
+OUT_ALL = "output/orders.json"
+OUT_NEW = "output/new_orders.json"
+
+
+def load_state() -> dict:
+    if not os.path.exists(STATE_PATH):
+        return {"last_id_order": 0}
+    with open(STATE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def fetch_with_retries(url: str, attempts: int = 5) -> bytes:
+    last_err = None
+
+    # opener přes HTTPSHandler (stabilnější než přímé urlopen v některých prostředích)
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
+
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(url)
+            with opener.open(req, timeout=30) as resp:
+                return resp.read()
+        except URLError as e:
+            last_err = e
+            print(f"Network error (attempt {attempt}/{attempts}): {e}")
+            time.sleep(10 * attempt)  # 10s, 20s, 30s, ...
+
+    raise SystemExit(f"Failed to fetch orders after retries: {last_err}")
 
 
 def main() -> None:
-    if not os.path.exists(INPUT):
-        print("No new_orders.json found")
-        return
+    password = os.environ.get("ESHOP_API_PASSWORD")
+    if not password:
+        raise SystemExit("Missing env var ESHOP_API_PASSWORD")
 
-    with open(INPUT, "r", encoding="utf-8") as f:
-        orders = json.load(f)
+    url = BASE_URL + password
 
-    if not orders:
-        print("No new orders")
-        return
-
-    o = orders[0]
-
-    order_number = str(o.get("number", ""))
-    customer = o.get("customer", {}).get("billing_information", {}).get("name", "")
-
-    row_list = o.get("row_list", [])
-    if not row_list:
-        print("Order has no row_list items")
-        return
-
-    item = row_list[0]
-    product_name = item.get("product_name", "")
-    qty = item.get("count", 1)
-    price = item.get("price_per_unit_with_vat", 0)
-
-    # bezpečné pro XML
-    order_number_xml = escape(order_number)
-    customer_xml = escape(customer)
-    product_xml = escape(product_name)
-
-    # POHODA obálka + namespace
-    # NOTE: teď řešíme jen validní "obal". Obsah objednávky ještě může POHODA chtít doladit,
-    # ale tato úprava odstraní chybu "Obálku dokumentu se nepodařilo ověřit podle schématu".
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<dat:dataPack
-  xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd"
-  xmlns:ord="http://www.stormware.cz/schema/version_2/order.xsd"
-  xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd"
-  id="MISDEKOR_IMPORT"
-  version="2.0"
-  ico="12345678"
-  application="misdekor-import"
-  note="Import objednávek z Eshop-rychle">
-
-  <dat:dataPackItem id="{order_number_xml}" version="2.0">
-    <ord:order>
-      <ord:orderHeader>
-        <ord:number>{order_number_xml}</ord:number>
-        <ord:text>Objednávka z e-shopu</ord:text>
-
-        <ord:partnerIdentity>
-          <typ:address>
-            <typ:name>{customer_xml}</typ:name>
-          </typ:address>
-        </ord:partnerIdentity>
-      </ord:orderHeader>
-
-      <ord:orderDetail>
-        <ord:orderItem>
-          <ord:text>{product_xml}</ord:text>
-          <ord:quantity>{qty}</ord:quantity>
-          <ord:unitPrice>{price}</ord:unitPrice>
-        </ord:orderItem>
-      </ord:orderDetail>
-    </ord:order>
-  </dat:dataPackItem>
-
-</dat:dataPack>
-"""
+    raw = fetch_with_retries(url)
 
     os.makedirs("output", exist_ok=True)
-    with open(OUTPUT, "w", encoding="utf-8") as f:
-        f.write(xml)
+    with open(OUT_ALL, "wb") as f:
+        f.write(raw)
 
-    print("Saved output/pohoda.xml (POHODA envelope)")
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+
+    # Tvoje API vrací objednávky v: params -> orderList
+    orders = (data.get("params", {}) or {}).get("orderList", [])
+    if not isinstance(orders, list):
+        orders = []
+
+    state = load_state()
+    last_id = int(state.get("last_id_order", 0))
+
+    new_orders = []
+    max_id = last_id
+
+    for o in orders:
+        try:
+            oid = int(o.get("id_order"))
+        except Exception:
+            continue
+
+        if oid > last_id:
+            new_orders.append(o)
+            if oid > max_id:
+                max_id = oid
+
+    with open(OUT_NEW, "w", encoding="utf-8") as f:
+        json.dump(new_orders, f, ensure_ascii=False, indent=2)
+
+    state["last_id_order"] = max_id
+    save_state(state)
+
+    print(f"Saved {OUT_ALL}")
+    print(f"Saved {OUT_NEW} (new: {len(new_orders)})")
+    print(f"Updated state last_id_order: {last_id} -> {max_id}")
 
 
 if __name__ == "__main__":
