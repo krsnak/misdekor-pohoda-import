@@ -5,32 +5,29 @@ from xml.sax.saxutils import escape
 INPUT = "output/new_orders.json"
 OUTPUT = "output/pohoda.xml"
 
-POHODA_ICO = "12345678"
+POHODA_ICO = "12345678"   # testovací firma
 
 
 def main() -> None:
-    # 1) Musí existovat new_orders.json
     if not os.path.exists(INPUT):
         print("No new_orders.json found")
         return
 
-    # 2) Načteme nové objednávky
     with open(INPUT, "r", encoding="utf-8") as f:
         orders = json.load(f)
 
     if not orders:
-        print("No new orders -> nothing to export")
+        print("No new orders")
         return
 
-    # 3) Vezmeme první objednávku (zatím test)
     o = orders[0]
 
-    order_number = str(o.get("number", ""))
+    order_id = str(o.get("number", "ESHOP_ORDER"))  # použijeme jako ID balíčku
     customer = o.get("customer", {}).get("billing_information", {}).get("name", "")
 
     row_list = o.get("row_list", [])
     if not row_list:
-        print("Order has no items")
+        print("Order has no row_list items")
         return
 
     item = row_list[0]
@@ -38,12 +35,11 @@ def main() -> None:
     qty = item.get("count", 1)
     price = item.get("price_per_unit_with_vat", 0)
 
-    # Escape textů pro XML
-    order_number_xml = escape(order_number)
+    # XML-safe
+    order_id_xml = escape(order_id)
     customer_xml = escape(customer)
     product_xml = escape(product_name)
 
-    # 4) POHODA XML obálka + jedna položka
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <dat:dataPack
   xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd"
@@ -55,11 +51,12 @@ def main() -> None:
   application="misdekor-import"
   note="Import objednávek z Eshop-rychle">
 
-  <dat:dataPackItem id="{order_number_xml}" version="2.0">
+  <dat:dataPackItem id="{order_id_xml}" version="2.0">
     <ord:order version="2.0">
       <ord:orderHeader>
-        <ord:number>{order_number_xml}</ord:number>
-        <ord:text>Objednávka z e-shopu</ord:text>
+        <!-- ord:number schválně NEPOSÍLÁME (POHODA Start to často odmítá v tomto tvaru).
+             POHODA si číslo objednávky přidělí sama podle číselné řady. -->
+        <ord:text>Objednávka z e-shopu {order_id_xml}</ord:text>
 
         <ord:partnerIdentity>
           <typ:address>
@@ -86,7 +83,7 @@ def main() -> None:
     with open(OUTPUT, "w", encoding="utf-8") as f:
         f.write(xml)
 
-    print("Saved output/pohoda.xml (correct generator)")
+    print("Saved output/pohoda.xml (without ord:number)")
 
 
 if __name__ == "__main__":
