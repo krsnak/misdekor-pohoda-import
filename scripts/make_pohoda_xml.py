@@ -55,9 +55,7 @@ def fetch_with_retries(url: str, attempts: int = 5) -> bytes:
 
 
 def main() -> None:
-    password = os.environ.get("ESHOP_API_PASSWORD")
-    if not password:
-        raise SystemExit("Missing env var ESHOP_API_PASSWORD")
+    
 
     url = BASE_URL + password
 
