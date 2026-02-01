@@ -1,0 +1,22 @@
+name: Fetch orders (test)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run fetch script
+        env:
+          ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
+        run: |
+          python3 scripts/fetch_orders.py
+
+      - name: Upload orders.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: orders-json
+          path: output/orders.json
