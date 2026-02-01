@@ -56,7 +56,7 @@ def main() -> None:
   note="Import objednávek z Eshop-rychle">
 
   <dat:dataPackItem id="{order_number_xml}" version="2.0">
-    <ord:order>
+    <ord:order version="2.0">
       <ord:orderHeader>
         <ord:number>{order_number_xml}</ord:number>
         <ord:text>Objednávka z e-shopu</ord:text>
