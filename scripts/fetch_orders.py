@@ -27,8 +27,26 @@ def main() -> None:
         raise SystemExit("Missing env var ESHOP_API_PASSWORD")
 
     url = BASE_URL + password
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        raw = resp.read()
+    import time
+from urllib.error import URLError
+
+raw = None
+last_err = None
+
+for attempt in range(1, 6):  # 5 pokusů
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            raw = resp.read()
+        last_err = None
+        break
+    except URLError as e:
+        last_err = e
+        print(f"Network error (attempt {attempt}/5): {e}")
+        time.sleep(10 * attempt)  # 10s, 20s, 30s, 40s, 50s
+
+if raw is None:
+    raise SystemExit(f"Failed to fetch orders after retries: {last_err}")
+
 
     os.makedirs("output", exist_ok=True)
     with open(OUT_ALL, "wb") as f:
