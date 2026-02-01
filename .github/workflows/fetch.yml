@@ -15,8 +15,10 @@ jobs:
         run: |
           python3 scripts/fetch_orders.py
 
-      - name: Upload orders.json
+      - name: Upload json artifacts
         uses: actions/upload-artifact@v4
         with:
           name: orders-json
-          path: output/orders.json
+          path: |
+            output/orders.json
+            output/new_orders.json
