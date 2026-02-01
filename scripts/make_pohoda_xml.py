@@ -5,8 +5,6 @@ from xml.sax.saxutils import escape
 INPUT = "output/new_orders.json"
 OUTPUT = "output/pohoda.xml"
 
-POHODA_ICO = "12345678"   # testovací firma
-
 
 def main() -> None:
     if not os.path.exists(INPUT):
@@ -20,10 +18,14 @@ def main() -> None:
         print("No new orders")
         return
 
+    # vezmeme první objednávku
     o = orders[0]
 
-    order_id = str(o.get("number", "ESHOP_ORDER"))  # použijeme jako ID balíčku
-    customer = o.get("customer", {}).get("billing_information", {}).get("name", "")
+    customer = (
+        o.get("customer", {})
+        .get("billing_information", {})
+        .get("name", "")
+    )
 
     row_list = o.get("row_list", [])
     if not row_list:
@@ -35,8 +37,7 @@ def main() -> None:
     qty = item.get("count", 1)
     price = item.get("price_per_unit_with_vat", 0)
 
-    # XML-safe
-    order_id_xml = escape(order_id)
+    # bezpečné texty do XML
     customer_xml = escape(customer)
     product_xml = escape(product_name)
 
@@ -47,16 +48,19 @@ def main() -> None:
   xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd"
   id="MISDEKOR_IMPORT"
   version="2.0"
-  ico="{POHODA_ICO}"
+  ico="12345678"
   application="misdekor-import"
   note="Import objednávek z Eshop-rychle">
 
-  <dat:dataPackItem id="{order_id_xml}" version="2.0">
+  <dat:dataPackItem id="OBJ001" version="2.0">
+
     <ord:order version="2.0">
+
       <ord:orderHeader>
-        <!-- ord:number schválně NEPOSÍLÁME (POHODA Start to často odmítá v tomto tvaru).
-             POHODA si číslo objednávky přidělí sama podle číselné řady. -->
-        <ord:text>Objednávka z e-shopu {order_id_xml}</ord:text>
+        <!-- Typ dokladu: Přijatá objednávka -->
+        <ord:orderType>receivedOrder</ord:orderType>
+
+        <ord:text>Objednávka z e-shopu</ord:text>
 
         <ord:partnerIdentity>
           <typ:address>
@@ -69,11 +73,21 @@ def main() -> None:
         <ord:orderItem>
           <ord:text>{product_xml}</ord:text>
           <ord:quantity>{qty}</ord:quantity>
-          <ord:unitPrice>{price}</ord:unitPrice>
+
+          <!-- Povinné položky podle vzoru -->
+          <ord:delivered>0</ord:delivered>
+          <ord:rateVAT>high</ord:rateVAT>
+
+          <!-- Cena musí být v homeCurrency -->
+          <ord:homeCurrency>
+            <typ:unitPrice>{price}</typ:unitPrice>
+          </ord:homeCurrency>
+
         </ord:orderItem>
       </ord:orderDetail>
 
     </ord:order>
+
   </dat:dataPackItem>
 
 </dat:dataPack>
@@ -83,7 +97,7 @@ def main() -> None:
     with open(OUTPUT, "w", encoding="utf-8") as f:
         f.write(xml)
 
-    print("Saved output/pohoda.xml (without ord:number)")
+    print("Saved output/pohoda.xml (valid POHODA order structure)")
 
 
 if __name__ == "__main__":
