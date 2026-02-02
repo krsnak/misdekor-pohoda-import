@@ -3,6 +3,17 @@ import os
 import time
 import urllib.request
 from urllib.error import URLError
+import socket
+
+# --- Force IPv4 (GitHub Actions někdy selže na IPv6 trase) ---
+socket.setdefaulttimeout(30)
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = _getaddrinfo_ipv4
+# ------------------------------------------------------------
 
 BASE_URL = "https://www.misdekor.cz/request.php?action=GetOrders&version=v2.0&password="
 
@@ -21,7 +32,6 @@ def load_state() -> dict:
             return {"last_id_order": 0}
         return data
     except Exception:
-        # když je state.json poškozený, radši začni od 0
         return {"last_id_order": 0}
 
 
@@ -32,15 +42,17 @@ def save_state(state: dict) -> None:
 
 def fetch_with_retries(url: str, attempts: int = 5) -> bytes:
     last_err = None
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
 
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(url, timeout=30) as resp:
+            req = urllib.request.Request(url)
+            with opener.open(req, timeout=30) as resp:
                 return resp.read()
         except URLError as e:
             last_err = e
             print(f"Network error (attempt {attempt}/{attempts}): {e}")
-            time.sleep(10 * attempt)  # 10s, 20s, 30s, ...
+            time.sleep(10 * attempt)
 
     raise SystemExit(f"Failed to fetch orders after retries: {last_err}")
 
@@ -67,7 +79,6 @@ def main() -> None:
 
     data = json.loads(raw.decode("utf-8", errors="replace"))
 
-    # API: params -> orderList
     orders = (data.get("params", {}) or {}).get("orderList", [])
     if not isinstance(orders, list):
         orders = []
@@ -78,7 +89,6 @@ def main() -> None:
     new_orders = []
     max_id = last_id
 
-    # projdi objednávky a vezmi jen nové (id_order > last_id)
     for o in orders:
         oid = safe_int((o or {}).get("id_order"), None)
         if oid is None:
@@ -86,10 +96,11 @@ def main() -> None:
 
         if oid > last_id:
             new_orders.append(o)
+
         if oid > max_id:
             max_id = oid
 
-    # FALLBACK: když nejsou nové, tak aspoň poslední 1 (nejvyšší id_order)
+    # FALLBACK: když nejsou nové, exportuj aspoň poslední 1 (nejvyšší id_order)
     if not new_orders and orders:
         def key_id(x):
             return safe_int((x or {}).get("id_order"), -1) or -1
@@ -101,7 +112,6 @@ def main() -> None:
     with open(OUT_NEW, "w", encoding="utf-8") as f:
         json.dump(new_orders, f, ensure_ascii=False, indent=2)
 
-    # aktualizace stavu (posuň na nejvyšší ID, které API vrátilo)
     state["last_id_order"] = max_id
     save_state(state)
 
@@ -109,12 +119,10 @@ def main() -> None:
     print(f"Saved {OUT_NEW} (new: {len(new_orders)})")
     print(f"Updated state last_id_order: {last_id} -> {max_id}")
 
-    if not orders:
-        print("Warning: API returned no orders (empty list).")
-    elif not new_orders:
-        print("Warning: No orders selected for export (this should be rare).")
-    elif len(new_orders) == 1 and safe_int(new_orders[0].get("id_order"), -1) <= last_id:
-        print("Info: No new orders; exported the latest one as fallback.")
+    if len(new_orders) == 1:
+        oid = safe_int((new_orders[0] or {}).get("id_order"), -1)
+        if oid != -1 and oid <= last_id:
+            print("Info: No new orders; exported the latest one as fallback.")
 
 
 if __name__ == "__main__":
