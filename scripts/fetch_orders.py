@@ -9,8 +9,10 @@ import socket
 socket.setdefaulttimeout(30)
 _orig_getaddrinfo = socket.getaddrinfo
 
+
 def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
     return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
 
 socket.getaddrinfo = _getaddrinfo_ipv4
 # ------------------------------------------------------------
@@ -30,6 +32,8 @@ def load_state() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             return {"last_id_order": 0}
+        if "last_id_order" not in data:
+            data["last_id_order"] = 0
         return data
     except Exception:
         return {"last_id_order": 0}
@@ -57,7 +61,7 @@ def fetch_with_retries(url: str, attempts: int = 5) -> bytes:
     raise SystemExit(f"Failed to fetch orders after retries: {last_err}")
 
 
-def safe_int(value, default=None):
+def safe_int(value, default=0) -> int:
     try:
         return int(value)
     except Exception:
@@ -84,14 +88,14 @@ def main() -> None:
         orders = []
 
     state = load_state()
-    last_id = safe_int(state.get("last_id_order", 0), 0) or 0
+    last_id = safe_int(state.get("last_id_order", 0), 0)
 
     new_orders = []
     max_id = last_id
 
     for o in orders:
-        oid = safe_int((o or {}).get("id_order"), None)
-        if oid is None:
+        oid = safe_int((o or {}).get("id_order"), -1)
+        if oid <= 0:
             continue
 
         if oid > last_id:
@@ -100,29 +104,16 @@ def main() -> None:
         if oid > max_id:
             max_id = oid
 
-    # FALLBACK: když nejsou nové, exportuj aspoň poslední 1 (nejvyšší id_order)
-    if not new_orders and orders:
-        def key_id(x):
-            return safe_int((x or {}).get("id_order"), -1) or -1
-
-        last_order = max(orders, key=key_id)
-        if key_id(last_order) > 0:
-            new_orders = [last_order]
-
     with open(OUT_NEW, "w", encoding="utf-8") as f:
         json.dump(new_orders, f, ensure_ascii=False, indent=2)
 
+    # update state
     state["last_id_order"] = max_id
     save_state(state)
 
     print(f"Saved {OUT_ALL}")
     print(f"Saved {OUT_NEW} (new: {len(new_orders)})")
     print(f"Updated state last_id_order: {last_id} -> {max_id}")
-
-    if len(new_orders) == 1:
-        oid = safe_int((new_orders[0] or {}).get("id_order"), -1)
-        if oid != -1 and oid <= last_id:
-            print("Info: No new orders; exported the latest one as fallback.")
 
 
 if __name__ == "__main__":
