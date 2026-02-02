@@ -7,7 +7,7 @@ from xml.sax.saxutils import escape
 INPUT = "output/new_orders.json"
 OUTPUT = "output/pohoda.xml"
 
-ICO = "12345678"
+ICO = "09405399"
 
 # podle vzoru z Eshop-rychle (typ:store -> typ:ids)
 DEFAULT_STORE_IDS = "1"
