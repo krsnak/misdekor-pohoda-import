@@ -1,7 +1,10 @@
-name: Fetch orders + make POHODA XML (test)
+name: Fetch orders + make POHODA XML
 
 on:
   workflow_dispatch:
+  # Pokud chceš automaticky každou hodinu, odkomentuj:
+  # schedule:
+  #   - cron: "0 * * * *"
 
 jobs:
   fetch:
@@ -9,17 +12,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 1) stáhni state.json z posledního běhu (pokud existuje)
+      - name: Download previous state (if exists)
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: fetch.yml
+          name: pohoda-state
+          path: .
+          if_no_artifact_found: ignore
+
+      # 2) stáhni objednávky + vytvoř new_orders.json
       - name: Fetch orders (JSON)
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
         run: |
           python3 scripts/fetch_orders.py
 
-      - name: Make POHODA XML (first test)
+      # 3) vyrob POHODA XML z output/new_orders.json
+      - name: Make POHODA XML
         run: |
           python3 scripts/make_pohoda_xml.py
 
-      - name: Upload artifacts
+      # 4) nahraj výstupy (jako doteď)
+      - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
         with:
           name: orders-output
@@ -28,4 +44,10 @@ jobs:
             output/new_orders.json
             output/pohoda.xml
 
-            
+      # 5) nahraj state.json pro příští běh
+      - name: Upload state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pohoda-state
+          path: |
+            state.json
