@@ -12,13 +12,40 @@ ICO = "12345678"
 # podle vzoru z Eshop-rychle (typ:store -> typ:ids)
 DEFAULT_STORE_IDS = "1"
 
+# bezpečné limity pro ord:text
+TEXT_MAX_LEN_ITEM = 100
+TEXT_MAX_LEN_NOTE = 80
+TEXT_MAX_LEN_PAYMENT_IDS = 60
+
+
+def safe_text(value: str, max_len: int) -> str:
+    """Ořízne text na max_len, přidá … a provede XML escape."""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    if len(s) > max_len:
+        s = s[: max_len - 1].rstrip() + "…"
+    return escape(s)
+
+
+def simplify_delivery_name(name: str) -> str:
+    """
+    Z dopravy zahodí detail výdejního místa.
+    "DPD ParcelShop CZ - Na výdejní místo - Tábor, ... ([CZ31044])"
+    -> "DPD ParcelShop CZ - Na výdejní místo"
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+
+    parts = [p.strip() for p in s.split(" - ")]
+    if len(parts) >= 2:
+        return " - ".join(parts[:2])  # jen značka + typ (bez adresy boxu)
+    return s
+
 
 def to_date_yyyy_mm_dd(value) -> str:
-    """
-    Vytáhne datum z API, jinak vezme dnešek. Pohoda typicky chce YYYY-MM-DD.
-    Umí zpracovat i strukturu:
-      {"date":"2026-01-27 21:34:01.000000", "timezone":"Europe/Prague", ...}
-    """
+    """Vytáhne datum z API, jinak vezme dnešek. Pohoda chce YYYY-MM-DD."""
     if not value:
         return datetime.now().strftime("%Y-%m-%d")
 
@@ -27,8 +54,6 @@ def to_date_yyyy_mm_dd(value) -> str:
         value = value.get("date") or value.get("datetime") or ""
 
     s = str(value)
-
-    # "2026-01-27 21:34:01.000000" -> bereme prvních 19 znaků
     s19 = s[:19]
 
     for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
@@ -85,7 +110,6 @@ def main() -> None:
     for o in orders:
         order_id = o.get("id_order")
         order_number = (o.get("number") or str(order_id or "")).strip()
-
         pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
 
         billing = get_billing(o)
@@ -96,7 +120,6 @@ def main() -> None:
         ico = (billing.get("ico", "") or "").strip()
         dic = (billing.get("dic", "") or "").strip()
 
-        # datum – v tvém JSONu je to typicky o["created"]["date"]
         date_val = (
             o.get("created")
             or o.get("origin", {}).get("date")
@@ -111,7 +134,8 @@ def main() -> None:
         delivery = get_delivery(o)
         payment = get_payment(o)
 
-        delivery_name = (delivery.get("nazev_postovne") or "").strip()
+        delivery_name_full = (delivery.get("nazev_postovne") or "").strip()
+        delivery_name = simplify_delivery_name(delivery_name_full)  # zahodit box detail
         delivery_price = delivery.get("postovne", 0)
 
         payment_name = (payment.get("nazev_platba") or "").strip()
@@ -124,13 +148,14 @@ def main() -> None:
 
         order_items_parts: list[str] = []
 
+        # ZBOŽÍ
         for r in row_list:
             product_name = (r.get("product_name") or r.get("name") or "").strip()
             product_code = (r.get("product_number") or "").strip()
             qty = int_or(r.get("count", 1), default=1)
             unit = (r.get("unit") or "").strip()
 
-            # ceny jsou s DPH → bereme unitPrice jako s DPH
+            # ceny jsou s DPH → unitPrice bereme s DPH
             price = r.get("price_per_unit_with_vat", None)
             if price is None:
                 price = r.get("price_with_vat", None)
@@ -138,13 +163,14 @@ def main() -> None:
                 price = r.get("price", 0)
 
             unit_price = dec2(price)
-            product_xml = escape(product_name) if product_name else "Položka"
+            product_xml = safe_text(product_name, TEXT_MAX_LEN_ITEM) or "Položka"
 
-            # skladová položka, pokud máme kód produktu (product_number)
-            stock_xml = ""
-            code_xml = ""
             unit_xml = f"\n          <ord:unit>{escape(unit)}</ord:unit>" if unit else ""
 
+            code_xml = ""
+            stock_xml = ""
+
+            # skladová položka, pokud máme product_number
             if product_code:
                 code_xml = f"\n          <ord:code>{escape(product_code)}</ord:code>"
                 stock_xml = f"""
@@ -168,35 +194,40 @@ def main() -> None:
         </ord:orderItem>""".rstrip()
             )
 
-        # doprava jako textová položka
-        if delivery_name and Decimal(str(delivery_price or 0)) > 0:
-            order_items_parts.append(
-                f"""
+        # DOPRAVA (zkrácený název bez detailu boxu)
+        try:
+            if delivery_name and Decimal(str(delivery_price or 0)) > 0:
+                order_items_parts.append(
+                    f"""
         <ord:orderItem>
-          <ord:text>{escape(delivery_name)}</ord:text>
+          <ord:text>{safe_text(delivery_name, 60)}</ord:text>
           <ord:quantity>1</ord:quantity>
           <ord:homeCurrency>
             <typ:unitPrice>{dec2(delivery_price)}</typ:unitPrice>
           </ord:homeCurrency>
         </ord:orderItem>""".rstrip()
-            )
+                )
+        except Exception:
+            pass
 
-        # dobírka/platba jako textová položka
-        if payment_name and Decimal(str(payment_price or 0)) > 0:
-            order_items_parts.append(
-                f"""
+        # DOBÍRKA / PLATBA
+        try:
+            if payment_name and Decimal(str(payment_price or 0)) > 0:
+                order_items_parts.append(
+                    f"""
         <ord:orderItem>
-          <ord:text>{escape(payment_name)}</ord:text>
+          <ord:text>{safe_text(payment_name, 60)}</ord:text>
           <ord:quantity>1</ord:quantity>
           <ord:homeCurrency>
             <typ:unitPrice>{dec2(payment_price)}</typ:unitPrice>
           </ord:homeCurrency>
         </ord:orderItem>""".rstrip()
-            )
+                )
+        except Exception:
+            pass
 
-        # partner
+        # Partner
         customer_xml = escape(name) if name else "Zákazník"
-
         address_parts = [f"<typ:name>{customer_xml}</typ:name>"]
         if street:
             address_parts.append(f"<typ:street>{escape(street)}</typ:street>")
@@ -211,20 +242,18 @@ def main() -> None:
 
         address_xml = "\n            ".join(address_parts)
 
-        # text do dokladu + numberOrder
+        # Header text + číslo objednávky
         note_text = f"Objednávka z e-shopu {order_number}".strip()
-        note_xml = escape(note_text)
+        note_xml = safe_text(note_text, TEXT_MAX_LEN_NOTE) or escape(note_text)
 
-        number_order_xml = ""
-        if order_number:
-            number_order_xml = f"\n        <ord:numberOrder>{escape(order_number)}</ord:numberOrder>"
+        number_order_xml = f"\n        <ord:numberOrder>{escape(order_number)}</ord:numberOrder>" if order_number else ""
 
-        # paymentType do headeru (styl jako Eshop-rychle)
+        # paymentType v headeru (pro odstranění warningu musí typ:ids existovat v POHODĚ)
         payment_type_xml = ""
         if payment_name:
             payment_type_xml = f"""
         <ord:paymentType>
-          <typ:ids>{escape(payment_name)}</typ:ids>
+          <typ:ids>{safe_text(payment_name, TEXT_MAX_LEN_PAYMENT_IDS)}</typ:ids>
           <typ:paymentType>delivery</typ:paymentType>
         </ord:paymentType>""".rstrip()
 
