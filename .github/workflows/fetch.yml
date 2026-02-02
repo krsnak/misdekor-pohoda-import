@@ -2,11 +2,8 @@ name: Fetch orders + make POHODA XML
 
 on:
   workflow_dispatch:
-    inputs:
-      force_repo_state:
-        description: "Ignore artifact state.json and use repository state.json (testing)"
-        required: false
-        default: "false"
+  schedule:
+    - cron: "0 * * * *"
 
 jobs:
   fetch:
@@ -24,18 +21,13 @@ jobs:
           path: _artifact_state
           if_no_artifact_found: ignore
 
-      - name: Choose state source (artifact vs repo)
+      - name: Use artifact state.json if present (else keep repo state.json or create default)
         run: |
-          echo "force_repo_state=${{ github.event.inputs.force_repo_state }}"
-          if [ "${{ github.event.inputs.force_repo_state }}" = "true" ]; then
-            echo "Using REPO state.json (testing mode)."
+          if [ -f "_artifact_state/state.json" ]; then
+            echo "Using ARTIFACT state.json."
+            cp _artifact_state/state.json state.json
           else
-            if [ -f "_artifact_state/state.json" ]; then
-              echo "Using ARTIFACT state.json."
-              cp _artifact_state/state.json state.json
-            else
-              echo "No artifact state.json found. Using REPO state.json (or default)."
-            fi
+            echo "No artifact state.json found. Using REPO state.json (or default)."
           fi
 
           if [ ! -f state.json ]; then
