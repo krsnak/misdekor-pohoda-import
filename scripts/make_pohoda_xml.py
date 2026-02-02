@@ -9,19 +9,31 @@ OUTPUT = "output/pohoda.xml"
 
 ICO = "12345678"
 
+# podle vzoru z Eshop-rychle (typ:store -> typ:ids)
+DEFAULT_STORE_IDS = "1"
 
-def to_date_yyyy_mm_dd(value: str | None) -> str:
+
+def to_date_yyyy_mm_dd(value) -> str:
     """
-    Pokusí se vytáhnout datum z API (různé formáty), jinak vezme dnešek.
-    Pohoda chce typicky YYYY-MM-DD.
+    Vytáhne datum z API, jinak vezme dnešek. Pohoda typicky chce YYYY-MM-DD.
+    Umí zpracovat i strukturu:
+      {"date":"2026-01-27 21:34:01.000000", "timezone":"Europe/Prague", ...}
     """
     if not value:
         return datetime.now().strftime("%Y-%m-%d")
 
-    # nejčastěji bývá "2026-02-01 12:34:56" nebo ISO
+    # Eshop-rychle často posílá dict {date: "..."}
+    if isinstance(value, dict):
+        value = value.get("date") or value.get("datetime") or ""
+
+    s = str(value)
+
+    # "2026-01-27 21:34:01.000000" -> bereme prvních 19 znaků
+    s19 = s[:19]
+
     for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(value[:19], fmt).strftime("%Y-%m-%d")
+            return datetime.strptime(s19, fmt).strftime("%Y-%m-%d")
         except Exception:
             pass
 
@@ -29,12 +41,9 @@ def to_date_yyyy_mm_dd(value: str | None) -> str:
 
 
 def dec2(value, default="0.00") -> str:
-    """
-    Bezpečně zkonvertuje na Decimal a naformátuje na 2 desetinná místa s tečkou.
-    """
+    """Decimal na 2 desetinná místa, vždy s tečkou."""
     try:
         d = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        # vždy tečka, žádné tisícové oddělovače
         return f"{d:.2f}"
     except (InvalidOperation, ValueError, TypeError):
         return default
@@ -49,6 +58,14 @@ def int_or(value, default=1) -> int:
 
 def get_billing(o: dict) -> dict:
     return (o.get("customer", {}) or {}).get("billing_information", {}) or {}
+
+
+def get_delivery(o: dict) -> dict:
+    return o.get("delivery", {}) or {}
+
+
+def get_payment(o: dict) -> dict:
+    return o.get("payment", {}) or {}
 
 
 def main() -> None:
@@ -67,62 +84,119 @@ def main() -> None:
 
     for o in orders:
         order_id = o.get("id_order")
-        order_number = o.get("number") or str(order_id or "").strip()
+        order_number = (o.get("number") or str(order_id or "")).strip()
+
         pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
 
         billing = get_billing(o)
-        name = billing.get("name", "") or ""
-        street = billing.get("street", "") or ""
-        city = billing.get("city", "") or ""
-        zip_code = billing.get("zip", "") or ""
-        ico = billing.get("ico", "") or ""   # pokud ho API dává
-        dic = billing.get("dic", "") or ""   # pokud ho API dává
+        name = (billing.get("name", "") or "").strip()
+        street = (billing.get("street", "") or "").strip()
+        city = (billing.get("city", "") or "").strip()
+        zip_code = (billing.get("zip", "") or "").strip()
+        ico = (billing.get("ico", "") or "").strip()
+        dic = (billing.get("dic", "") or "").strip()
 
-        # datum z objednávky (názvy polí se můžou lišit – zkusíme pár variant)
+        # datum – v tvém JSONu je to typicky o["created"]["date"]
         date_val = (
-            o.get("date")
+            o.get("created")
+            or o.get("origin", {}).get("date")
+            or o.get("date")
             or o.get("date_add")
-            or o.get("created")
             or o.get("created_at")
             or ""
         )
-        doc_date = to_date_yyyy_mm_dd(str(date_val) if date_val is not None else None)
+        doc_date = to_date_yyyy_mm_dd(date_val)
 
-        # položky
+        # doprava/platba z JSONu
+        delivery = get_delivery(o)
+        payment = get_payment(o)
+
+        delivery_name = (delivery.get("nazev_postovne") or "").strip()
+        delivery_price = delivery.get("postovne", 0)
+
+        payment_name = (payment.get("nazev_platba") or "").strip()
+        payment_price = payment.get("castka_platba", 0)
+
+        # položky zboží
         row_list = o.get("row_list", []) or []
         if not isinstance(row_list, list) or not row_list:
-            # objednávka bez položek radši přeskočit
             continue
 
         order_items_parts: list[str] = []
+
         for r in row_list:
             product_name = (r.get("product_name") or r.get("name") or "").strip()
+            product_code = (r.get("product_number") or "").strip()
             qty = int_or(r.get("count", 1), default=1)
+            unit = (r.get("unit") or "").strip()
 
-            # ceny jsou s DPH → bereme unitPrice jako s DPH (homeCurrency/unitPrice)
+            # ceny jsou s DPH → bereme unitPrice jako s DPH
             price = r.get("price_per_unit_with_vat", None)
             if price is None:
                 price = r.get("price_with_vat", None)
             if price is None:
                 price = r.get("price", 0)
 
-            product_xml = escape(product_name) if product_name else "Položka"
             unit_price = dec2(price)
+            product_xml = escape(product_name) if product_name else "Položka"
+
+            # skladová položka, pokud máme kód produktu (product_number)
+            stock_xml = ""
+            code_xml = ""
+            unit_xml = f"\n          <ord:unit>{escape(unit)}</ord:unit>" if unit else ""
+
+            if product_code:
+                code_xml = f"\n          <ord:code>{escape(product_code)}</ord:code>"
+                stock_xml = f"""
+          <ord:stockItem>
+            <typ:store>
+              <typ:ids>{escape(DEFAULT_STORE_IDS)}</typ:ids>
+            </typ:store>
+            <typ:stockItem>
+              <typ:ids>{escape(product_code)}</typ:ids>
+            </typ:stockItem>
+          </ord:stockItem>""".rstrip()
 
             order_items_parts.append(
                 f"""
         <ord:orderItem>
           <ord:text>{product_xml}</ord:text>
-          <ord:quantity>{qty}</ord:quantity>
+          <ord:quantity>{qty}</ord:quantity>{unit_xml}
           <ord:homeCurrency>
             <typ:unitPrice>{unit_price}</typ:unitPrice>
+          </ord:homeCurrency>{code_xml}{stock_xml}
+        </ord:orderItem>""".rstrip()
+            )
+
+        # doprava jako textová položka
+        if delivery_name and Decimal(str(delivery_price or 0)) > 0:
+            order_items_parts.append(
+                f"""
+        <ord:orderItem>
+          <ord:text>{escape(delivery_name)}</ord:text>
+          <ord:quantity>1</ord:quantity>
+          <ord:homeCurrency>
+            <typ:unitPrice>{dec2(delivery_price)}</typ:unitPrice>
           </ord:homeCurrency>
         </ord:orderItem>""".rstrip()
             )
 
+        # dobírka/platba jako textová položka
+        if payment_name and Decimal(str(payment_price or 0)) > 0:
+            order_items_parts.append(
+                f"""
+        <ord:orderItem>
+          <ord:text>{escape(payment_name)}</ord:text>
+          <ord:quantity>1</ord:quantity>
+          <ord:homeCurrency>
+            <typ:unitPrice>{dec2(payment_price)}</typ:unitPrice>
+          </ord:homeCurrency>
+        </ord:orderItem>""".rstrip()
+            )
+
+        # partner
         customer_xml = escape(name) if name else "Zákazník"
 
-        # Adresa – držíme se minima. (Name je nejdůležitější.)
         address_parts = [f"<typ:name>{customer_xml}</typ:name>"]
         if street:
             address_parts.append(f"<typ:street>{escape(street)}</typ:street>")
@@ -131,16 +205,28 @@ def main() -> None:
         if zip_code:
             address_parts.append(f"<typ:zip>{escape(zip_code)}</typ:zip>")
         if ico:
-            address_parts.append(f"<typ:ico>{escape(str(ico))}</typ:ico>")
+            address_parts.append(f"<typ:ico>{escape(ico)}</typ:ico>")
         if dic:
-            address_parts.append(f"<typ:dic>{escape(str(dic))}</typ:dic>")
+            address_parts.append(f"<typ:dic>{escape(dic)}</typ:dic>")
 
         address_xml = "\n            ".join(address_parts)
 
-        # Pozn.: ord:number jsme dřív odstranili (Pohoda to nechce jako plain text).
-        # Pokud budeš chtít svázat číslo objednávky, dává se to obvykle do textu/poznámky.
+        # text do dokladu + numberOrder
         note_text = f"Objednávka z e-shopu {order_number}".strip()
         note_xml = escape(note_text)
+
+        number_order_xml = ""
+        if order_number:
+            number_order_xml = f"\n        <ord:numberOrder>{escape(order_number)}</ord:numberOrder>"
+
+        # paymentType do headeru (styl jako Eshop-rychle)
+        payment_type_xml = ""
+        if payment_name:
+            payment_type_xml = f"""
+        <ord:paymentType>
+          <typ:ids>{escape(payment_name)}</typ:ids>
+          <typ:paymentType>delivery</typ:paymentType>
+        </ord:paymentType>""".rstrip()
 
         items_xml.append(
             f"""
@@ -148,7 +234,7 @@ def main() -> None:
     <ord:order version="2.0">
 
       <ord:orderHeader>
-        <ord:orderType>receivedOrder</ord:orderType>
+        <ord:orderType>receivedOrder</ord:orderType>{number_order_xml}
         <ord:date>{doc_date}</ord:date>
         <ord:text>{note_xml}</ord:text>
 
@@ -156,7 +242,7 @@ def main() -> None:
           <typ:address>
             {address_xml}
           </typ:address>
-        </ord:partnerIdentity>
+        </ord:partnerIdentity>{payment_type_xml}
       </ord:orderHeader>
 
       <ord:orderDetail>
