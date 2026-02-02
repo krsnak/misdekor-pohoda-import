@@ -2,7 +2,6 @@ name: Fetch orders + make POHODA XML
 
 on:
   workflow_dispatch:
-  # Pokud chceš automaticky každou hodinu, odkomentuj:
   # schedule:
   #   - cron: "0 * * * *"
 
@@ -12,7 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) stáhni state.json z posledního běhu (pokud existuje)
       - name: Download previous state (if exists)
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v3
@@ -22,19 +20,35 @@ jobs:
           path: .
           if_no_artifact_found: ignore
 
-      # 2) stáhni objednávky + vytvoř new_orders.json
       - name: Fetch orders (JSON)
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
         run: |
           python3 scripts/fetch_orders.py
 
-      # 3) vyrob POHODA XML z output/new_orders.json
       - name: Make POHODA XML
         run: |
           python3 scripts/make_pohoda_xml.py
 
-      # 4) nahraj výstupy (jako doteď)
+      # Zjisti počet nových objednávek a nastav output
+      - name: Detect new orders count
+        id: new
+        run: |
+          python3 - << 'PY'
+          import json
+          p = "output/new_orders.json"
+          try:
+            data = json.load(open(p, "r", encoding="utf-8"))
+            n = len(data) if isinstance(data, list) else 0
+          except Exception:
+            n = 0
+          print(f"new_orders_count={n}")
+          print(f"has_new={'true' if n>0 else 'false'}")
+          with open("GITHUB_OUTPUT", "a", encoding="utf-8") as f:
+            f.write(f"count={n}\n")
+            f.write(f"has_new={'true' if n>0 else 'false'}\n")
+          PY
+
       - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
         with:
@@ -44,10 +58,27 @@ jobs:
             output/new_orders.json
             output/pohoda.xml
 
-      # 5) nahraj state.json pro příští běh
       - name: Upload state artifact
         uses: actions/upload-artifact@v4
         with:
           name: pohoda-state
           path: |
             state.json
+
+      # Email jen pokud jsou nové objednávky
+      - name: Send POHODA XML by email (only if new orders)
+        if: steps.new.outputs.has_new == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }}"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM }}
+          body: |
+            Ahoj,
+            v příloze posílám pohoda.xml pro import (nové objednávky: ${{ steps.new.outputs.count }}).
+          attachments: |
+            output/pohoda.xml
