@@ -26,28 +26,28 @@ jobs:
         run: |
           python3 scripts/fetch_orders.py
 
-      - name: Make POHODA XML
-        run: |
-          python3 scripts/make_pohoda_xml.py
-
-      # Zjisti počet nových objednávek a nastav output
       - name: Detect new orders count
         id: new
         run: |
           python3 - << 'PY'
-          import json
+          import json, os
           p = "output/new_orders.json"
           try:
-            data = json.load(open(p, "r", encoding="utf-8"))
+            with open(p, "r", encoding="utf-8") as f:
+              data = json.load(f)
             n = len(data) if isinstance(data, list) else 0
           except Exception:
             n = 0
-          print(f"new_orders_count={n}")
-          print(f"has_new={'true' if n>0 else 'false'}")
-          with open("GITHUB_OUTPUT", "a", encoding="utf-8") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"count={n}\n")
             f.write(f"has_new={'true' if n>0 else 'false'}\n")
+          print(f"count={n}")
           PY
+
+      - name: Make POHODA XML (only if new orders)
+        if: steps.new.outputs.has_new == 'true'
+        run: |
+          python3 scripts/make_pohoda_xml.py
 
       - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
@@ -65,7 +65,6 @@ jobs:
           path: |
             state.json
 
-      # Email jen pokud jsou nové objednávky
       - name: Send POHODA XML by email (only if new orders)
         if: steps.new.outputs.has_new == 'true'
         uses: dawidd6/action-send-mail@v3
