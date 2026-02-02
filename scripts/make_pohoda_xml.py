@@ -9,6 +9,11 @@ OUTPUT = "output/pohoda.xml"
 
 ICO = "09405399"
 
+# ====== PŘEPÍNAČ ======
+# False = NEPOSÍLAT stockItem (nebude to hledat sklad → bez warningu "Zásoba neexistuje")
+# True  = POSÍLAT stockItem (párování na skladovou zásobu podle kódu)
+USE_STOCK = False
+
 # podle vzoru z Eshop-rychle (typ:store -> typ:ids)
 DEFAULT_STORE_IDS = "1"
 
@@ -40,7 +45,7 @@ def simplify_delivery_name(name: str) -> str:
 
     parts = [p.strip() for p in s.split(" - ")]
     if len(parts) >= 2:
-        return " - ".join(parts[:2])  # jen značka + typ (bez adresy boxu)
+        return " - ".join(parts[:2])  # značka + typ (bez adresy boxu)
     return s
 
 
@@ -49,7 +54,7 @@ def to_date_yyyy_mm_dd(value) -> str:
     if not value:
         return datetime.now().strftime("%Y-%m-%d")
 
-    # Eshop-rychle často posílá dict {date: "..."}
+    # Eshop-rychle často posílá dict {date: "...", timezone...}
     if isinstance(value, dict):
         value = value.get("date") or value.get("datetime") or ""
 
@@ -120,9 +125,10 @@ def main() -> None:
         ico = (billing.get("ico", "") or "").strip()
         dic = (billing.get("dic", "") or "").strip()
 
+        # datum z objednávky (z tvého JSONu to často bývá o["created"]["date"] nebo origin.date.date)
         date_val = (
             o.get("created")
-            or o.get("origin", {}).get("date")
+            or (o.get("origin", {}) or {}).get("date")
             or o.get("date")
             or o.get("date_add")
             or o.get("created_at")
@@ -130,12 +136,12 @@ def main() -> None:
         )
         doc_date = to_date_yyyy_mm_dd(date_val)
 
-        # doprava/platba z JSONu
+        # doprava / platba z JSONu
         delivery = get_delivery(o)
         payment = get_payment(o)
 
         delivery_name_full = (delivery.get("nazev_postovne") or "").strip()
-        delivery_name = simplify_delivery_name(delivery_name_full)  # zahodit box detail
+        delivery_name = simplify_delivery_name(delivery_name_full)
         delivery_price = delivery.get("postovne", 0)
 
         payment_name = (payment.get("nazev_platba") or "").strip()
@@ -148,7 +154,7 @@ def main() -> None:
 
         order_items_parts: list[str] = []
 
-        # ZBOŽÍ
+        # ===== ZBOŽÍ =====
         for r in row_list:
             product_name = (r.get("product_name") or r.get("name") or "").strip()
             product_code = (r.get("product_number") or "").strip()
@@ -170,10 +176,13 @@ def main() -> None:
             code_xml = ""
             stock_xml = ""
 
-            # skladová položka, pokud máme product_number
+            # Kód položky může být užitečný i bez skladu (kvůli dohledání)
             if product_code:
                 code_xml = f"\n          <ord:code>{escape(product_code)}</ord:code>"
-                stock_xml = f"""
+
+                # ====== skladem / bez skladu podle přepínače ======
+                if USE_STOCK:
+                    stock_xml = f"""
           <ord:stockItem>
             <typ:store>
               <typ:ids>{escape(DEFAULT_STORE_IDS)}</typ:ids>
@@ -194,7 +203,7 @@ def main() -> None:
         </ord:orderItem>""".rstrip()
             )
 
-        # DOPRAVA (zkrácený název bez detailu boxu)
+        # ===== DOPRAVA =====
         try:
             if delivery_name and Decimal(str(delivery_price or 0)) > 0:
                 order_items_parts.append(
@@ -210,7 +219,7 @@ def main() -> None:
         except Exception:
             pass
 
-        # DOBÍRKA / PLATBA
+        # ===== DOBÍRKA / PLATEBNÍ POPLATEK =====
         try:
             if payment_name and Decimal(str(payment_price or 0)) > 0:
                 order_items_parts.append(
@@ -248,15 +257,6 @@ def main() -> None:
 
         number_order_xml = f"\n        <ord:numberOrder>{escape(order_number)}</ord:numberOrder>" if order_number else ""
 
-        # paymentType v headeru (pro odstranění warningu musí typ:ids existovat v POHODĚ)
-        payment_type_xml = ""
-        if payment_name:
-            payment_type_xml = f"""
-        <ord:paymentType>
-          <typ:ids>{safe_text(payment_name, TEXT_MAX_LEN_PAYMENT_IDS)}</typ:ids>
-          <typ:paymentType>delivery</typ:paymentType>
-        </ord:paymentType>""".rstrip()
-
         items_xml.append(
             f"""
   <dat:dataPackItem id="{escape(pack_item_id)}" version="2.0">
@@ -271,7 +271,7 @@ def main() -> None:
           <typ:address>
             {address_xml}
           </typ:address>
-        </ord:partnerIdentity>{payment_type_xml}
+        </ord:partnerIdentity>
       </ord:orderHeader>
 
       <ord:orderDetail>
@@ -307,6 +307,7 @@ def main() -> None:
         f.write(xml)
 
     print(f"Saved {OUTPUT} (items: {len(items_xml)})")
+    print(f"USE_STOCK = {USE_STOCK}")
 
 
 if __name__ == "__main__":
