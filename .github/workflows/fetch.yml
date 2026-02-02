@@ -65,7 +65,7 @@ jobs:
           path: |
             state.json
 
-      - name: Send POHODA XML by email (only if new orders)
+            - name: Send POHODA XML by email (only if new orders)
         if: steps.new.outputs.has_new == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
@@ -73,11 +73,12 @@ jobs:
           server_port: ${{ secrets.SMTP_PORT }}
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
+          secure: false
           subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }}"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
             Ahoj,
-            v příloze posílám pohoda.xml pro import (nové objednávky: ${{ steps.new.outputs.count }}).
+            v příloze posílám pohoda.xml pro import.
           attachments: |
             output/pohoda.xml
