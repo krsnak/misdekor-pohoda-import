@@ -1,120 +1,143 @@
+#!/usr/bin/env python3
 import json
 import os
+import sys
 import time
 import urllib.request
-from urllib.error import URLError
-import socket
+import urllib.error
+from datetime import datetime
 
-# --- Force IPv4 (GitHub Actions někdy selže na IPv6 trase) ---
-socket.setdefaulttimeout(30)
-_orig_getaddrinfo = socket.getaddrinfo
+API_BASE = "https://www.misdekor.cz/request.php"
+OUTPUT_DIR = "output"
+ORDERS_ALL = os.path.join(OUTPUT_DIR, "orders.json")
+ORDERS_NEW = os.path.join(OUTPUT_DIR, "new_orders.json")
+STATE_FILE = "state.json"
 
+# Síťové limity
+CONNECT_READ_TIMEOUT_SEC = 25  # timeout pro urlopen (socket)
+MAX_ATTEMPTS = 5               # retry pokusy
+SLEEP_BASE = 2                 # exponenciální backoff: 2,4,8...
 
-def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
-    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-
-socket.getaddrinfo = _getaddrinfo_ipv4
-# ------------------------------------------------------------
-
-BASE_URL = "https://www.misdekor.cz/request.php?action=GetOrders&version=v2.0&password="
-
-STATE_PATH = "state.json"
-OUT_ALL = "output/orders.json"
-OUT_NEW = "output/new_orders.json"
-
+def log(msg: str):
+    print(f"[fetch_orders] {msg}", flush=True)
 
 def load_state() -> dict:
-    if not os.path.exists(STATE_PATH):
-        return {"last_id_order": 0}
-    try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"last_id_order": 0}
-        if "last_id_order" not in data:
-            data["last_id_order"] = 0
-        return data
-    except Exception:
-        return {"last_id_order": 0}
-
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+    return {"last_id_order": 0}
 
 def save_state(state: dict) -> None:
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+def build_url(password: str) -> str:
+    # pozor: heslo je v query parametru, tak ať to zůstane stejné jako dřív
+    return f"{API_BASE}?action=GetOrders&version=v2.0&password={password}"
 
-def fetch_with_retries(url: str, attempts: int = 5) -> bytes:
+def fetch_json(url: str) -> object:
     last_err = None
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
-
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            req = urllib.request.Request(url)
-            with opener.open(req, timeout=30) as resp:
-                return resp.read()
-        except URLError as e:
+            log(f"HTTP GET attempt {attempt}/{MAX_ATTEMPTS}")
+            req = urllib.request.Request(url, headers={"User-Agent": "misdekor-gha"})
+            with urllib.request.urlopen(req, timeout=CONNECT_READ_TIMEOUT_SEC) as r:
+                raw = r.read()
+            # některé servery vrací BOM / whitespace
+            txt = raw.decode("utf-8", errors="replace").strip()
+            data = json.loads(txt)
+            return data
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
             last_err = e
-            print(f"Network error (attempt {attempt}/{attempts}): {e}")
-            time.sleep(10 * attempt)
+            wait = SLEEP_BASE * (2 ** (attempt - 1))
+            log(f"ERROR: {type(e).__name__}: {e} (sleep {wait}s)")
+            time.sleep(wait)
+    raise RuntimeError(f"Failed to fetch/parse JSON after {MAX_ATTEMPTS} attempts: {last_err}")
 
-    raise SystemExit(f"Failed to fetch orders after retries: {last_err}")
+def normalize_orders(raw: object) -> list[dict]:
+    """
+    Vrátí list objednávek jako dicty.
+    Podpora:
+      - list[dict]
+      - dict wrapper s klíčem orders/data/items/...
+    """
+    data = raw
 
+    if isinstance(data, dict):
+        for k in ("orders", "data", "items", "result", "order_list", "list"):
+            v = data.get(k)
+            if isinstance(v, list):
+                data = v
+                break
 
-def safe_int(value, default=0) -> int:
+    if not isinstance(data, list):
+        # fallback: když je to dict bez známého klíče, zkus najít první list value
+        if isinstance(raw, dict):
+            for v in raw.values():
+                if isinstance(v, list):
+                    data = v
+                    break
+
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected API JSON structure. Top={type(raw)}")
+
+    cleaned: list[dict] = []
+    for i, o in enumerate(data):
+        if isinstance(o, dict):
+            cleaned.append(o)
+        elif isinstance(o, str):
+            s = o.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    obj = json.loads(s)
+                    if isinstance(obj, dict):
+                        cleaned.append(obj)
+                        continue
+                except Exception:
+                    pass
+            log(f"WARNING: skipping non-dict order at index {i} (string)")
+        else:
+            log(f"WARNING: skipping non-dict order at index {i} ({type(o)})")
+    return cleaned
+
+def order_id(o: dict) -> int:
+    # Eshop-rychle obvykle id_order
+    v = o.get("id_order") or o.get("id") or o.get("order_id")
     try:
-        return int(value)
+        return int(v)
     except Exception:
-        return default
+        return 0
 
-
-def main() -> None:
-    password = os.environ.get("ESHOP_API_PASSWORD")
+def main():
+    password = os.environ.get("ESHOP_API_PASSWORD", "").strip()
     if not password:
-        raise SystemExit("Missing env var ESHOP_API_PASSWORD")
+        log("ERROR: ESHOP_API_PASSWORD is not set")
+        sys.exit(1)
 
-    url = BASE_URL + password
+    mode = (os.environ.get("MODE") or "live").strip().lower()
+    if mode not in ("live", "test"):
+        mode = "live"
 
-    raw = fetch_with_retries(url)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    os.makedirs("output", exist_ok=True)
-    with open(OUT_ALL, "wb") as f:
-        f.write(raw)
+    url = build_url(password)
+    log(f"Mode: {mode}")
+    log("Fetching orders from API...")
+    raw = fetch_json(url)
+    orders = normalize_orders(raw)
+    log(f"Fetched orders: {len(orders)}")
 
-    data = json.loads(raw.decode("utf-8", errors="replace"))
-
-    orders = (data.get("params", {}) or {}).get("orderList", [])
-    if not isinstance(orders, list):
-        orders = []
+    # ulož všechny
+    with open(ORDERS_ALL, "w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=2)
 
     state = load_state()
-    last_id = safe_int(state.get("last_id_order", 0), 0)
-
-    new_orders = []
-    max_id = last_id
-
-    for o in orders:
-        oid = safe_int((o or {}).get("id_order"), -1)
-        if oid <= 0:
-            continue
-
-        if oid > last_id:
-            new_orders.append(o)
-
-        if oid > max_id:
-            max_id = oid
-
-    with open(OUT_NEW, "w", encoding="utf-8") as f:
-        json.dump(new_orders, f, ensure_ascii=False, indent=2)
-
-    # update state
-    state["last_id_order"] = max_id
-    save_state(state)
-
-    print(f"Saved {OUT_ALL}")
-    print(f"Saved {OUT_NEW} (new: {len(new_orders)})")
-    print(f"Updated state last_id_order: {last_id} -> {max_id}")
-
-
-if __name__ == "__main__":
-    main()
+    last_id = 0
+    try:
+        last_id = int(state.get("last_id_order", 0))
+    except Exception:
