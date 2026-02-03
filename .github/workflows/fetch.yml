@@ -2,6 +2,15 @@ name: Fetch orders + make POHODA XML
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "live = jen nové objednávky, test = vygeneruje XML vždy z orders.json (bez update state)"
+        required: true
+        default: "live"
+        type: choice
+        options:
+          - live
+          - test
   schedule:
     - cron: "0 * * * *"
 
@@ -12,14 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ Doporučené: mít jistotu, že máme Python + pip
       - name: Set up Python
-      - uses: actions/setup-python@v5
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # (Pokud používáš jen původní make_pohoda_xml.py, nic navíc netřeba.
-      # Pokud používáš knihovnu "pohoda", přidej pip install. Nevadí ani když ji zatím nepoužíváš.)
       - name: Install dependencies (optional)
         run: |
           python -m pip install --upgrade pip
@@ -54,7 +60,14 @@ jobs:
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
         run: |
-          python3 scripts/fetch_orders.py
+          # předpoklad: fetch_orders.py umí režim (viz níže)
+          python3 scripts/fetch_orders.py --mode "${{ github.event.inputs.mode || 'live' }}"
+
+      # Pokud ještě nemáš --mode ve fetch_orders.py, použij dočasně tento krok místo úpravy skriptu:
+      # - name: TEST: Force new_orders.json from orders.json (test mode only)
+      #   if: ${{ (github.event.inputs.mode || 'live') == 'test' }}
+      #   run: |
+      #     cp output/orders.json output/new_orders.json
 
       - name: Detect new orders count
         id: new
@@ -76,21 +89,12 @@ jobs:
           print("new orders:", n)
           PY
 
-      # ✅ TEST krok: vygeneruje XML i když nejsou nové objednávky
-      # (Jen pro ověření, že make_pohoda_xml.py nebo make_pohoda_xml_lib.py funguje.)
-      - name: TEST: Force XML generation once
+      # ✅ VŽDY generuj XML (stabilita)
+      - name: Make POHODA XML
         run: |
-          cp output/orders.json output/new_orders.json
           python3 scripts/make_pohoda_xml.py
           ls -lah output || true
 
-      # Ostrý krok (můžeš nechat, ale při testu už je vlastně zbytečný)
-      - name: Make POHODA XML (only if new orders)
-        if: steps.new.outputs.has_new == 'true'
-        run: |
-          python3 scripts/make_pohoda_xml.py
-
-      # ✅ Upload ať nepadá, když XML náhodou nevznikne
       - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
         with:
@@ -101,14 +105,17 @@ jobs:
             output/new_orders.json
             output/pohoda.xml
 
+      # ✅ State ukládej jen v live režimu (test ti nemá hýbat last_id_order)
       - name: Upload state artifact
+        if: ${{ (github.event.inputs.mode || 'live') == 'live' }}
         uses: actions/upload-artifact@v4
         with:
           name: pohoda-state
           path: state.json
 
-      - name: Send POHODA XML by email (only if new orders)
-        if: steps.new.outputs.has_new == 'true'
+      # ✅ Email pošli, když jsou nové, NEBO když je test režim
+      - name: Send POHODA XML by email
+        if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -116,7 +123,7 @@ jobs:
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
           secure: false
-          subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }}"
+          subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }} (mode: ${{ github.event.inputs.mode || 'live' }})"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
