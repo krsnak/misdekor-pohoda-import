@@ -7,7 +7,7 @@ from xml.sax.saxutils import escape
 INPUT = "output/new_orders.json"
 OUTPUT = "output/pohoda.xml"
 
-ICO = "09405399"
+ICO = "27201694"
 
 # =========================
 # PŘEPÍNAČ: sklad / bez skladu
