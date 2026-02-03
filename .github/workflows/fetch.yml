@@ -100,3 +100,8 @@ jobs:
             v příloze posílám pohoda.xml pro import do POHODY.
           attachments: |
             output/pohoda.xml
+      - name: TEST: Force XML generation once
+        run: |
+          cp output/orders.json output/new_orders.json
+          python3 scripts/make_pohoda_xml_lib.py
+          ls -lah output
