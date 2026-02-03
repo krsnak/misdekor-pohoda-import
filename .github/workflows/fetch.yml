@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "live = jen nové objednávky, test = vygeneruje XML vždy z orders.json (bez update state)"
+        description: "live = jen nové objednávky, test = vygeneruje XML vždy z orders.json (bez ukládání state)"
         required: true
         default: "live"
         type: choice
@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies (optional)
         run: |
           python -m pip install --upgrade pip
-          # pip install pohoda
+          # (legacy make_pohoda_xml.py nic navíc nepotřebuje)
 
       - name: Download previous state artifact (if exists) to temp folder
         continue-on-error: true
@@ -60,14 +60,16 @@ jobs:
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
         run: |
-          # předpoklad: fetch_orders.py umí režim (viz níže)
-          python3 scripts/fetch_orders.py --mode "${{ github.event.inputs.mode || 'live' }}"
+          python3 scripts/fetch_orders.py
+          ls -lah output || true
 
-      # Pokud ještě nemáš --mode ve fetch_orders.py, použij dočasně tento krok místo úpravy skriptu:
-      # - name: TEST: Force new_orders.json from orders.json (test mode only)
-      #   if: ${{ (github.event.inputs.mode || 'live') == 'test' }}
-      #   run: |
-      #     cp output/orders.json output/new_orders.json
+      # TEST mode: vynutí generování XML z orders.json (bez ohledu na "nové")
+      - name: TEST mode - force new_orders.json from orders.json
+        if: ${{ (github.event.inputs.mode || 'live') == 'test' }}
+        run: |
+          mkdir -p output
+          cp -f output/orders.json output/new_orders.json
+          echo "TEST MODE: copied output/orders.json -> output/new_orders.json"
 
       - name: Detect new orders count
         id: new
@@ -78,7 +80,7 @@ jobs:
           try:
             with open(p, "r", encoding="utf-8") as f:
               data = json.load(f)
-            n = len(data) if isinstance(data, list) else 0
+            n = len(data) if isinstance(data, list) else (len(data.get("orders", [])) if isinstance(data, dict) else 0)
           except Exception:
             n = 0
 
@@ -89,13 +91,44 @@ jobs:
           print("new orders:", n)
           PY
 
-      # ✅ VŽDY generuj XML (stabilita)
-      - name: Make POHODA XML
+      # Generuj XML:
+      # - v LIVE jen když jsou nové
+      # - v TEST vždy
+      - name: Make POHODA XML (legacy)
+        if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
         run: |
           python3 scripts/make_pohoda_xml.py
-          ls -lah output || true
+
+          echo "Looking for generated pohoda.xml..."
+          find . -maxdepth 4 -type f -iname "pohoda.xml" -print -ls || true
+
+          mkdir -p output
+
+          # Normalizace: zajistí output/pohoda.xml i když skript zapisuje jinam
+          if [ -f output/pohoda.xml ]; then
+            echo "OK: output/pohoda.xml exists"
+          elif [ -f pohoda.xml ]; then
+            echo "Found ./pohoda.xml -> copying to output/pohoda.xml"
+            cp -f pohoda.xml output/pohoda.xml
+          else
+            FOUND="$(find . -maxdepth 4 -type f -iname "pohoda.xml" | head -n 1)"
+            if [ -n "$FOUND" ]; then
+              echo "Found $FOUND -> copying to output/pohoda.xml"
+              cp -f "$FOUND" output/pohoda.xml
+            else
+              echo "ERROR: pohoda.xml not found anywhere (maxdepth 4)"
+              echo "Output dir listing:"
+              ls -lah output || true
+              exit 1
+            fi
+          fi
+
+          echo "Final file:"
+          ls -lah output/pohoda.xml
+          wc -c output/pohoda.xml
 
       - name: Upload outputs artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: orders-output
@@ -104,8 +137,9 @@ jobs:
             output/orders.json
             output/new_orders.json
             output/pohoda.xml
+            state.json
 
-      # ✅ State ukládej jen v live režimu (test ti nemá hýbat last_id_order)
+      # State ukládej jen v LIVE režimu (test ti nesmí hýbat last_id_order)
       - name: Upload state artifact
         if: ${{ (github.event.inputs.mode || 'live') == 'live' }}
         uses: actions/upload-artifact@v4
@@ -113,7 +147,6 @@ jobs:
           name: pohoda-state
           path: state.json
 
-      # ✅ Email pošli, když jsou nové, NEBO když je test režim
       - name: Send POHODA XML by email
         if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
         uses: dawidd6/action-send-mail@v3
@@ -129,5 +162,6 @@ jobs:
           body: |
             Ahoj,
             v příloze posílám pohoda.xml pro import do POHODY.
-          attachments: |
-            output/pohoda.xml
+          attachments: output/pohoda.xml
+          nodemailerlog: true
+          nodemailerdebug: true
