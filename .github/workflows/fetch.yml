@@ -17,6 +17,7 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +27,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (optional)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # (legacy make_pohoda_xml.py nic navíc nepotřebuje)
 
-      - name: Download previous state artifact (if exists) to temp folder
+      - name: Download previous state artifact (if exists)
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v3
         with:
@@ -59,17 +59,13 @@ jobs:
       - name: Fetch orders (JSON)
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
+          MODE: ${{ github.event.inputs.mode || 'live' }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          python3 scripts/fetch_orders.py
+          # tvrdý limit i na úrovni shellu (když by python visel)
+          timeout 180 python3 -u scripts/fetch_orders.py
+          echo "Output dir:"
           ls -lah output || true
-
-      # TEST mode: vynutí generování XML z orders.json (bez ohledu na "nové")
-      - name: TEST mode - force new_orders.json from orders.json
-        if: ${{ (github.event.inputs.mode || 'live') == 'test' }}
-        run: |
-          mkdir -p output
-          cp -f output/orders.json output/new_orders.json
-          echo "TEST MODE: copied output/orders.json -> output/new_orders.json"
 
       - name: Detect new orders count
         id: new
@@ -80,7 +76,12 @@ jobs:
           try:
             with open(p, "r", encoding="utf-8") as f:
               data = json.load(f)
-            n = len(data) if isinstance(data, list) else (len(data.get("orders", [])) if isinstance(data, dict) else 0)
+            if isinstance(data, dict) and "orders" in data and isinstance(data["orders"], list):
+              n = len(data["orders"])
+            elif isinstance(data, list):
+              n = len(data)
+            else:
+              n = 0
           except Exception:
             n = 0
 
@@ -91,9 +92,6 @@ jobs:
           print("new orders:", n)
           PY
 
-      # Generuj XML:
-      # - v LIVE jen když jsou nové
-      # - v TEST vždy
       - name: Make POHODA XML (legacy)
         if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
         run: |
@@ -104,7 +102,6 @@ jobs:
 
           mkdir -p output
 
-          # Normalizace: zajistí output/pohoda.xml i když skript zapisuje jinam
           if [ -f output/pohoda.xml ]; then
             echo "OK: output/pohoda.xml exists"
           elif [ -f pohoda.xml ]; then
@@ -117,7 +114,6 @@ jobs:
               cp -f "$FOUND" output/pohoda.xml
             else
               echo "ERROR: pohoda.xml not found anywhere (maxdepth 4)"
-              echo "Output dir listing:"
               ls -lah output || true
               exit 1
             fi
@@ -139,8 +135,7 @@ jobs:
             output/pohoda.xml
             state.json
 
-      # State ukládej jen v LIVE režimu (test ti nesmí hýbat last_id_order)
-      - name: Upload state artifact
+      - name: Upload state artifact (live only)
         if: ${{ (github.event.inputs.mode || 'live') == 'live' }}
         uses: actions/upload-artifact@v4
         with:
