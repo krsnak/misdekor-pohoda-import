@@ -12,6 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ✅ Doporučené: mít jistotu, že máme Python + pip
+      - name: Set up Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # (Pokud používáš jen původní make_pohoda_xml.py, nic navíc netřeba.
+      # Pokud používáš knihovnu "pohoda", přidej pip install. Nevadí ani když ji zatím nepoužíváš.)
+      - name: Install dependencies (optional)
+        run: |
+          python -m pip install --upgrade pip
+          # pip install pohoda
+
       - name: Download previous state artifact (if exists) to temp folder
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v3
@@ -63,15 +76,26 @@ jobs:
           print("new orders:", n)
           PY
 
+      # ✅ TEST krok: vygeneruje XML i když nejsou nové objednávky
+      # (Jen pro ověření, že make_pohoda_xml.py nebo make_pohoda_xml_lib.py funguje.)
+      - name: TEST: Force XML generation once
+        run: |
+          cp output/orders.json output/new_orders.json
+          python3 scripts/make_pohoda_xml.py
+          ls -lah output || true
+
+      # Ostrý krok (můžeš nechat, ale při testu už je vlastně zbytečný)
       - name: Make POHODA XML (only if new orders)
         if: steps.new.outputs.has_new == 'true'
         run: |
           python3 scripts/make_pohoda_xml.py
 
+      # ✅ Upload ať nepadá, když XML náhodou nevznikne
       - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
         with:
           name: orders-output
+          if-no-files-found: warn
           path: |
             output/orders.json
             output/new_orders.json
