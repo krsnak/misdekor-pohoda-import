@@ -13,21 +13,20 @@ ICO = "27201694"
 # =========================
 # PŘEPÍNAČ: sklad / bez skladu
 # =========================
-# False = položky jako text (žádné stockItem => žádné "Zásoba neexistuje")
-# True  = pokud existuje product_number, doplní code + stockItem (vazba na sklad)
 USE_STOCK = False
-
-# podle vzoru z Eshop-rychle: typ:store -> typ:ids
 DEFAULT_STORE_IDS = "1"
 
-# bezpečné limity pro ord:text (ať nepadá validace na délce)
+# limity textů kvůli validaci
 TEXT_MAX_LEN_ITEM = 100
 TEXT_MAX_LEN_NOTE = 80
-TEXT_MAX_LEN_PAYMENT_IDS = 60
 
+
+# -------------------------
+# HELPERS
+# -------------------------
 
 def safe_text(value: str, max_len: int) -> str:
-    """Ořízne text na max_len, přidá … a provede XML escape."""
+    """Ořízne text + XML escape."""
     s = (value or "").strip()
     if not s:
         return ""
@@ -37,11 +36,7 @@ def safe_text(value: str, max_len: int) -> str:
 
 
 def simplify_delivery_name(name: str) -> str:
-    """
-    Z dopravy zahodí detail výdejního místa.
-    "DPD ParcelShop CZ - Na výdejní místo - Tábor, ... ([CZ31044])"
-    -> "DPD ParcelShop CZ - Na výdejní místo"
-    """
+    """Zkrátí dopravu na první dvě části."""
     s = (name or "").strip()
     if not s:
         return ""
@@ -52,7 +47,7 @@ def simplify_delivery_name(name: str) -> str:
 
 
 def sanitize_pack_item_id(value: str) -> str:
-    """Normalize datapack item id to safe characters for POHODA import."""
+    """Bezpečný ID string pro POHODU."""
     s = (value or "").strip()
     if not s:
         return "UNKNOWN"
@@ -62,20 +57,18 @@ def sanitize_pack_item_id(value: str) -> str:
 
 
 def to_date_yyyy_mm_dd(value) -> str:
-    """Vytáhne datum z API, jinak vezme dnešek. Pohoda chce YYYY-MM-DD."""
+    """Pohoda chce YYYY-MM-DD."""
     if not value:
         return datetime.now().strftime("%Y-%m-%d")
 
-    # Eshop-rychle často posílá dict {date: "..."}
     if isinstance(value, dict):
         value = value.get("date") or value.get("datetime") or ""
 
-    s = str(value)
-    s19 = s[:19]
+    s = str(value)[:19]
 
     for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(s19, fmt).strftime("%Y-%m-%d")
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except Exception:
             pass
 
@@ -83,7 +76,7 @@ def to_date_yyyy_mm_dd(value) -> str:
 
 
 def dec2(value, default="0.00") -> str:
-    """Decimal na 2 desetinná místa, vždy s tečkou."""
+    """Decimal na 2 místa."""
     try:
         d = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return f"{d:.2f}"
@@ -98,134 +91,80 @@ def int_or(value, default=1) -> int:
         return default
 
 
-def get_billing(o: dict) -> dict:
-    return (o.get("customer", {}) or {}).get("billing_information", {}) or {}
+# -------------------------
+# NORMALIZE INPUT
+# -------------------------
 
-
-def get_delivery(o: dict) -> dict:
-    return o.get("delivery", {}) or {}
-
-
-def get_payment(o: dict) -> dict:
-    return o.get("payment", {}) or {}
-
-
-def _extract_first_list_from_dict(d: dict):
-    """Zkus najít první list uvnitř dictu."""
-    for v in d.values():
-        if isinstance(v, list):
-            return v
+def find_first_list(obj):
+    """Najde první list uvnitř wrapper dictu."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for key in ("orders", "order_list", "data", "items", "result"):
+            if key in obj and isinstance(obj[key], list):
+                return obj[key]
+        for v in obj.values():
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                sub = find_first_list(v)
+                if isinstance(sub, list):
+                    return sub
     return None
 
 
-def normalize_orders(raw):
-    """
-    Normalizuje vstup z new_orders.json na list[dict] objednávek.
-    Podporuje:
-      - list[dict]
-      - dict wrapper (orders/data/items/...)
-      - list[str] kde str je JSON objekt
-    """
-    data = raw
+def load_orders():
+    """Načte new_orders.json vždy jako list[dict]."""
+    with open(INPUT, "r", encoding="utf-8") as f:
+        raw = json.load(f)
 
-    # 1) Wrapper dict -> vyber známý klíč nebo první list
-    if isinstance(data, dict):
-        for key in ("orders", "data", "items", "result", "order_list", "list"):
-            v = data.get(key)
-            if isinstance(v, list):
-                data = v
-                break
-        else:
-            v = _extract_first_list_from_dict(data)
-            if isinstance(v, list):
-                data = v
+    lst = find_first_list(raw)
+    if not isinstance(lst, list):
+        raise ValueError("Unexpected JSON structure in new_orders.json")
 
-    # 2) list[str] -> zkus parsovat JSON stringy
-    if isinstance(data, list) and data and isinstance(data[0], str):
-        parsed = []
-        for s in data:
-            if not isinstance(s, str):
-                continue
-            ss = s.strip()
-            if ss.startswith("{") and ss.endswith("}"):
-                try:
-                    obj = json.loads(ss)
-                    if isinstance(obj, dict):
-                        parsed.append(obj)
-                except Exception:
-                    # necháme to být, zkusíme další
-                    pass
-        if parsed:
-            data = parsed
-
-    # 3) Finální kontrola
-    if not isinstance(data, list):
-        raise ValueError(f"Unexpected JSON structure: top-level type is {type(data)}")
-
-    # může být list, ale uvnitř něco jiného -> odfiltruj
-    cleaned = []
-    for i, o in enumerate(data):
-        if isinstance(o, dict):
-            cleaned.append(o)
-        else:
-            # když je to string a je to JSON objekt, zkus ještě jednou
-            if isinstance(o, str):
-                ss = o.strip()
-                if ss.startswith("{") and ss.endswith("}"):
-                    try:
-                        obj = json.loads(ss)
-                        if isinstance(obj, dict):
-                            cleaned.append(obj)
-                            continue
-                    except Exception:
-                        pass
-            print(f"WARNING: Skipping non-dict order at index {i} (type={type(o)})")
-    return cleaned
+    return [o for o in lst if isinstance(o, dict)]
 
 
-def main() -> None:
+# -------------------------
+# MAIN
+# -------------------------
+
+def main():
     if not os.path.exists(INPUT):
         print("No new_orders.json found")
         return
 
-    with open(INPUT, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-
-    try:
-        orders = normalize_orders(raw)
-    except Exception as e:
-        # lepší debug pro logy v Actions
-        print("ERROR: Cannot normalize new_orders.json structure.")
-        print("Top-level type:", type(raw))
-        if isinstance(raw, dict):
-            print("Dict keys:", list(raw.keys())[:50])
-        raise
+    orders = load_orders()
 
     if not orders:
-        print("No new orders (after normalization)")
+        print("No new orders")
         return
 
-    items_xml: list[str] = []
+    items_xml = []
+
+    # timestamp pro unikátní ID importu
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     for o in orders:
-        # extra pojistka
-        if not isinstance(o, dict):
-            continue
-
         order_id = o.get("id_order")
         order_number = (o.get("number") or str(order_id or "")).strip()
-        raw_pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
-        pack_item_id = sanitize_pack_item_id(raw_pack_item_id)
 
-        billing = get_billing(o)
-        name = (billing.get("name", "") or "").strip()
-        street = (billing.get("street", "") or "").strip()
-        city = (billing.get("city", "") or "").strip()
-        zip_code = (billing.get("zip", "") or "").strip()
-        ico = (billing.get("ico", "") or "").strip()
-        dic = (billing.get("dic", "") or "").strip()
+        # unikátní dataPackItem id
+        raw_id = f"ORDER_{order_id or order_number}_{stamp}"
+        pack_item_id = sanitize_pack_item_id(raw_id)
 
-        # datum
+        # billing info
+        billing = (o.get("customer", {}) or {}).get("billing_information", {}) or {}
+
+        name = (billing.get("name") or "").strip()
+        street = (billing.get("street") or "").strip()
+        city = (billing.get("city") or "").strip()
+        zip_code = (billing.get("zip") or "").strip()
+
+        # ZIP normalizace (odstraní mezery)
+        zip_code = zip_code.replace(" ", "")
+
+        # datum objednávky
         date_val = (
             o.get("created")
             or o.get("origin", {}).get("date")
@@ -236,12 +175,11 @@ def main() -> None:
         )
         doc_date = to_date_yyyy_mm_dd(date_val)
 
-        # doprava/platba
-        delivery = get_delivery(o)
-        payment = get_payment(o)
+        # doprava / platba
+        delivery = o.get("delivery", {}) or {}
+        payment = o.get("payment", {}) or {}
 
-        delivery_name_full = (delivery.get("nazev_postovne") or "").strip()
-        delivery_name = simplify_delivery_name(delivery_name_full)
+        delivery_name = simplify_delivery_name(delivery.get("nazev_postovne") or "")
         delivery_price = delivery.get("postovne", 0)
 
         payment_name = (payment.get("nazev_platba") or "").strip()
@@ -252,24 +190,25 @@ def main() -> None:
         if not isinstance(row_list, list) or not row_list:
             continue
 
-        order_items_parts: list[str] = []
+        order_items_parts = []
 
-        # ZBOŽÍ
+        # --- ZBOŽÍ ---
         for r in row_list:
             if not isinstance(r, dict):
                 continue
 
             product_name = (r.get("product_name") or r.get("name") or "").strip()
             product_code = (r.get("product_number") or "").strip()
-            qty = int_or(r.get("count", 1), default=1)
+
+            qty = int_or(r.get("count", 1))
             unit = (r.get("unit") or "").strip()
 
-            # ceny jsou s DPH → unitPrice bereme s DPH
-            price = r.get("price_per_unit_with_vat", None)
-            if price is None:
-                price = r.get("price_with_vat", None)
-            if price is None:
-                price = r.get("price", 0)
+            price = (
+                r.get("price_per_unit_with_vat")
+                or r.get("price_with_vat")
+                or r.get("price")
+                or 0
+            )
 
             unit_price = dec2(price)
             product_xml = safe_text(product_name, TEXT_MAX_LEN_ITEM) or "Položka"
@@ -279,7 +218,6 @@ def main() -> None:
             code_xml = ""
             stock_xml = ""
 
-            # skladová vazba jen pokud je zapnutá a máme kód
             if USE_STOCK and product_code:
                 code_xml = f"\n          <ord:code>{escape(product_code)}</ord:code>"
                 stock_xml = f"""
@@ -303,7 +241,7 @@ def main() -> None:
         </ord:orderItem>""".rstrip()
             )
 
-        # DOPRAVA
+        # --- DOPRAVA ---
         try:
             if delivery_name and Decimal(str(delivery_price or 0)) > 0:
                 order_items_parts.append(
@@ -319,7 +257,7 @@ def main() -> None:
         except Exception:
             pass
 
-        # DOBÍRKA / PLATBA
+        # --- DOBÍRKA / PLATBA ---
         try:
             if payment_name and Decimal(str(payment_price or 0)) > 0:
                 order_items_parts.append(
@@ -335,25 +273,19 @@ def main() -> None:
         except Exception:
             pass
 
-        # Partner
-        customer_xml = escape(name) if name else "Zákazník"
-        address_parts = [f"<typ:name>{customer_xml}</typ:name>"]
+        # partner identity
+        address_parts = [f"<typ:name>{escape(name) if name else 'Zákazník'}</typ:name>"]
         if street:
             address_parts.append(f"<typ:street>{escape(street)}</typ:street>")
         if city:
             address_parts.append(f"<typ:city>{escape(city)}</typ:city>")
         if zip_code:
             address_parts.append(f"<typ:zip>{escape(zip_code)}</typ:zip>")
-        if ico:
-            address_parts.append(f"<typ:ico>{escape(ico)}</typ:ico>")
-        if dic:
-            address_parts.append(f"<typ:dic>{escape(dic)}</typ:dic>")
 
         address_xml = "\n            ".join(address_parts)
 
-        # Header text + číslo objednávky
-        note_text = f"Objednávka z e-shopu {order_number}".strip()
-        note_xml = safe_text(note_text, TEXT_MAX_LEN_NOTE) or escape(note_text)
+        note_text = f"Objednávka z e-shopu {order_number}"
+        note_xml = safe_text(note_text, TEXT_MAX_LEN_NOTE)
 
         number_order_xml = (
             f"\n        <ord:numberOrder>{escape(order_number)}</ord:numberOrder>"
@@ -361,14 +293,7 @@ def main() -> None:
             else ""
         )
 
-        # paymentType v headeru (pokud nemáš v POHODĚ definované typy, může to dělat warning 603)
-        payment_type_xml = ""
-        if payment_name:
-            payment_type_xml = f"""
-        <ord:paymentType>
-          <typ:ids>{safe_text(payment_name, TEXT_MAX_LEN_PAYMENT_IDS)}</typ:ids>
-          <typ:paymentType>delivery</typ:paymentType>
-        </ord:paymentType>""".rstrip()
+        # !!! paymentType odstraněno úplně !!!
 
         items_xml.append(
             f"""
@@ -384,7 +309,8 @@ def main() -> None:
           <typ:address>
             {address_xml}
           </typ:address>
-        </ord:partnerIdentity>{payment_type_xml}
+        </ord:partnerIdentity>
+
       </ord:orderHeader>
 
       <ord:orderDetail>
@@ -396,7 +322,7 @@ def main() -> None:
         )
 
     if not items_xml:
-        print("No valid orders with items to export")
+        print("No valid orders with items")
         return
 
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -419,7 +345,7 @@ def main() -> None:
     with open(OUTPUT, "w", encoding="utf-8") as f:
         f.write(xml)
 
-    print(f"Saved {OUTPUT} (items: {len(items_xml)})")
+    print(f"Saved {OUTPUT} (orders: {len(items_xml)})")
 
 
 if __name__ == "__main__":
