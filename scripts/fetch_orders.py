@@ -4,7 +4,6 @@ import os
 import sys
 import time
 import urllib.request
-import urllib.error
 
 API_BASE = "https://www.misdekor.cz/request.php"
 
@@ -14,7 +13,7 @@ ORDERS_NEW = os.path.join(OUTPUT_DIR, "new_orders.json")
 
 STATE_FILE = "state.json"
 
-# Síťové limity (aby se to nikdy netočilo donekonečna)
+# Timeouty proti zaseknutí
 TIMEOUT_SEC = 25
 MAX_ATTEMPTS = 5
 BACKOFF_BASE = 2
@@ -25,7 +24,6 @@ def log(msg: str):
 
 
 def load_state() -> dict:
-    """Načte state.json nebo vrátí default."""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -33,24 +31,20 @@ def load_state() -> dict:
             if isinstance(d, dict):
                 return d
         except Exception as e:
-            log(f"WARNING: state.json invalid: {e}")
-
+            log(f"WARNING: invalid state.json: {e}")
     return {"last_id_order": 0}
 
 
 def save_state(state: dict):
-    """Uloží state.json."""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def build_url(password: str) -> str:
-    """Sestaví API URL."""
     return f"{API_BASE}?action=GetOrders&version=v2.0&password={password}"
 
 
 def fetch_json(url: str):
-    """Stáhne JSON s retry + timeout."""
     last_error = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -78,34 +72,50 @@ def fetch_json(url: str):
     raise RuntimeError(f"Failed after {MAX_ATTEMPTS} attempts: {last_error}")
 
 
+def find_first_list(obj):
+    """
+    Najde první list kdekoliv uvnitř dict struktury.
+    API Eshop-rychle často balí objednávky do wrapperu.
+    """
+    if isinstance(obj, list):
+        return obj
+
+    if isinstance(obj, dict):
+        # nejdřív zkus známé klíče
+        for key in ("orders", "order_list", "data", "items", "result"):
+            if key in obj and isinstance(obj[key], list):
+                return obj[key]
+
+        # fallback: projdi všechny hodnoty a najdi první list
+        for v in obj.values():
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                sub = find_first_list(v)
+                if isinstance(sub, list):
+                    return sub
+
+    return None
+
+
 def normalize_orders(raw) -> list[dict]:
     """
-    Normalizuje odpověď API na list[dict].
-    Podporuje:
-      - list[dict]
-      - dict wrapper: {"orders":[...]}
+    Vrátí list objednávek jako dicty.
     """
-    data = raw
+    lst = find_first_list(raw)
 
-    if isinstance(data, dict):
-        for key in ("orders", "data", "items", "result"):
-            if key in data and isinstance(data[key], list):
-                data = data[key]
-                break
+    if not isinstance(lst, list):
+        raise ValueError(
+            f"Unexpected API structure: top={type(raw)}, keys={list(raw.keys())[:20]}"
+            if isinstance(raw, dict)
+            else f"Unexpected API structure: top={type(raw)}"
+        )
 
-    if not isinstance(data, list):
-        raise ValueError(f"Unexpected API structure: {type(raw)}")
-
-    cleaned = []
-    for o in data:
-        if isinstance(o, dict):
-            cleaned.append(o)
-
+    cleaned = [o for o in lst if isinstance(o, dict)]
     return cleaned
 
 
 def get_order_id(order: dict) -> int:
-    """Vrátí id_order jako int."""
     val = order.get("id_order") or order.get("id") or 0
     try:
         return int(val)
@@ -131,6 +141,12 @@ def main():
     log("Fetching orders from API...")
 
     raw = fetch_json(url)
+
+    # DEBUG: vypiš klíče wrapperu (pomůže do budoucna)
+    if isinstance(raw, dict):
+        log("API returned dict wrapper keys:")
+        log(str(list(raw.keys())[:30]))
+
     orders = normalize_orders(raw)
 
     log(f"Fetched total orders: {len(orders)}")
@@ -142,7 +158,7 @@ def main():
     state = load_state()
     last_id = int(state.get("last_id_order", 0))
 
-    # TEST režim: vždy exportuj všechny objednávky jako nové
+    # TEST režim: všechny objednávky jako nové
     if mode == "test":
         with open(ORDERS_NEW, "w", encoding="utf-8") as f:
             json.dump(orders, f, ensure_ascii=False, indent=2)
@@ -151,7 +167,7 @@ def main():
         log("State not updated.")
         return
 
-    # LIVE režim: jen nové objednávky
+    # LIVE režim: jen nové
     new_orders = [o for o in orders if get_order_id(o) > last_id]
     new_orders = sorted(new_orders, key=get_order_id)
 
@@ -160,7 +176,7 @@ def main():
 
     log(f"New orders since last_id_order={last_id}: {len(new_orders)}")
 
-    # Update state.json
+    # Update state
     if new_orders:
         max_id = max(get_order_id(o) for o in new_orders)
         state["last_id_order"] = max_id
