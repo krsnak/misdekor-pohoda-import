@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from xml.sax.saxutils import escape
@@ -48,6 +49,16 @@ def simplify_delivery_name(name: str) -> str:
     if len(parts) >= 2:
         return " - ".join(parts[:2])
     return s
+
+
+def sanitize_pack_item_id(value: str) -> str:
+    """Normalize datapack item id to safe characters for POHODA import."""
+    s = (value or "").strip()
+    if not s:
+        return "UNKNOWN"
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", s)
+    return s or "UNKNOWN"
 
 
 def to_date_yyyy_mm_dd(value) -> str:
@@ -116,7 +127,8 @@ def main() -> None:
     for o in orders:
         order_id = o.get("id_order")
         order_number = (o.get("number") or str(order_id or "")).strip()
-        pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
+        raw_pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
+        pack_item_id = sanitize_pack_item_id(raw_pack_item_id)
 
         billing = get_billing(o)
         name = (billing.get("name", "") or "").strip()
