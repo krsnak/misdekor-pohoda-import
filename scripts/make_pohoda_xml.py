@@ -110,21 +110,108 @@ def get_payment(o: dict) -> dict:
     return o.get("payment", {}) or {}
 
 
+def _extract_first_list_from_dict(d: dict):
+    """Zkus najít první list uvnitř dictu."""
+    for v in d.values():
+        if isinstance(v, list):
+            return v
+    return None
+
+
+def normalize_orders(raw):
+    """
+    Normalizuje vstup z new_orders.json na list[dict] objednávek.
+    Podporuje:
+      - list[dict]
+      - dict wrapper (orders/data/items/...)
+      - list[str] kde str je JSON objekt
+    """
+    data = raw
+
+    # 1) Wrapper dict -> vyber známý klíč nebo první list
+    if isinstance(data, dict):
+        for key in ("orders", "data", "items", "result", "order_list", "list"):
+            v = data.get(key)
+            if isinstance(v, list):
+                data = v
+                break
+        else:
+            v = _extract_first_list_from_dict(data)
+            if isinstance(v, list):
+                data = v
+
+    # 2) list[str] -> zkus parsovat JSON stringy
+    if isinstance(data, list) and data and isinstance(data[0], str):
+        parsed = []
+        for s in data:
+            if not isinstance(s, str):
+                continue
+            ss = s.strip()
+            if ss.startswith("{") and ss.endswith("}"):
+                try:
+                    obj = json.loads(ss)
+                    if isinstance(obj, dict):
+                        parsed.append(obj)
+                except Exception:
+                    # necháme to být, zkusíme další
+                    pass
+        if parsed:
+            data = parsed
+
+    # 3) Finální kontrola
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected JSON structure: top-level type is {type(data)}")
+
+    # může být list, ale uvnitř něco jiného -> odfiltruj
+    cleaned = []
+    for i, o in enumerate(data):
+        if isinstance(o, dict):
+            cleaned.append(o)
+        else:
+            # když je to string a je to JSON objekt, zkus ještě jednou
+            if isinstance(o, str):
+                ss = o.strip()
+                if ss.startswith("{") and ss.endswith("}"):
+                    try:
+                        obj = json.loads(ss)
+                        if isinstance(obj, dict):
+                            cleaned.append(obj)
+                            continue
+                    except Exception:
+                        pass
+            print(f"WARNING: Skipping non-dict order at index {i} (type={type(o)})")
+    return cleaned
+
+
 def main() -> None:
     if not os.path.exists(INPUT):
         print("No new_orders.json found")
         return
 
     with open(INPUT, "r", encoding="utf-8") as f:
-        orders = json.load(f)
+        raw = json.load(f)
+
+    try:
+        orders = normalize_orders(raw)
+    except Exception as e:
+        # lepší debug pro logy v Actions
+        print("ERROR: Cannot normalize new_orders.json structure.")
+        print("Top-level type:", type(raw))
+        if isinstance(raw, dict):
+            print("Dict keys:", list(raw.keys())[:50])
+        raise
 
     if not orders:
-        print("No new orders")
+        print("No new orders (after normalization)")
         return
 
     items_xml: list[str] = []
 
     for o in orders:
+        # extra pojistka
+        if not isinstance(o, dict):
+            continue
+
         order_id = o.get("id_order")
         order_number = (o.get("number") or str(order_id or "")).strip()
         raw_pack_item_id = f"ORDER_{order_id or order_number or 'UNKNOWN'}"
@@ -169,6 +256,9 @@ def main() -> None:
 
         # ZBOŽÍ
         for r in row_list:
+            if not isinstance(r, dict):
+                continue
+
             product_name = (r.get("product_name") or r.get("name") or "").strip()
             product_code = (r.get("product_number") or "").strip()
             qty = int_or(r.get("count", 1), default=1)
@@ -272,7 +362,6 @@ def main() -> None:
         )
 
         # paymentType v headeru (pokud nemáš v POHODĚ definované typy, může to dělat warning 603)
-        # Když nechceš řešit, klidně to vypni -> nastav payment_type_xml = "" natvrdo.
         payment_type_xml = ""
         if payment_name:
             payment_type_xml = f"""
