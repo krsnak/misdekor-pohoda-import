@@ -2,15 +2,6 @@ name: Fetch orders + make POHODA XML
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: "live = jen nové objednávky, test = vygeneruje XML vždy z orders.json (bez ukládání state)"
-        required: true
-        default: "live"
-        type: choice
-        options:
-          - live
-          - test
   schedule:
     - cron: "0 * * * *"
 
@@ -59,7 +50,6 @@ jobs:
       - name: Fetch orders (JSON)
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
-          MODE: ${{ github.event.inputs.mode || 'live' }}
           PYTHONUNBUFFERED: "1"
         run: |
           # tvrdý limit i na úrovni shellu (když by python visel)
@@ -92,36 +82,11 @@ jobs:
           print("new orders:", n)
           PY
 
-      - name: Make POHODA XML (legacy)
-        if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
+      - name: Make POHODA XML
+        if: ${{ steps.new.outputs.has_new == 'true' }}
         run: |
-          python3 scripts/make_pohoda_xml.py
-
-          echo "Looking for generated pohoda.xml..."
-          find . -maxdepth 4 -type f -iname "pohoda.xml" -print -ls || true
-
-          mkdir -p output
-
-          if [ -f output/pohoda.xml ]; then
-            echo "OK: output/pohoda.xml exists"
-          elif [ -f pohoda.xml ]; then
-            echo "Found ./pohoda.xml -> copying to output/pohoda.xml"
-            cp -f pohoda.xml output/pohoda.xml
-          else
-            FOUND="$(find . -maxdepth 4 -type f -iname "pohoda.xml" | head -n 1)"
-            if [ -n "$FOUND" ]; then
-              echo "Found $FOUND -> copying to output/pohoda.xml"
-              cp -f "$FOUND" output/pohoda.xml
-            else
-              echo "ERROR: pohoda.xml not found anywhere (maxdepth 4)"
-              ls -lah output || true
-              exit 1
-            fi
-          fi
-
-          echo "Final file:"
-          ls -lah output/pohoda.xml
-          wc -c output/pohoda.xml
+          timeout 60 python3 scripts/make_pohoda_xml.py
+          test -s output/pohoda.xml
 
       - name: Upload outputs artifact
         if: always()
@@ -135,15 +100,15 @@ jobs:
             output/pohoda.xml
             state.json
 
-      - name: Upload state artifact (live only)
-        if: ${{ (github.event.inputs.mode || 'live') == 'live' }}
+      - name: Upload state artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pohoda-state
           path: state.json
 
       - name: Send POHODA XML by email
-        if: ${{ steps.new.outputs.has_new == 'true' || (github.event.inputs.mode || 'live') == 'test' }}
+        if: ${{ steps.new.outputs.has_new == 'true' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -151,7 +116,7 @@ jobs:
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
           secure: false
-          subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }} (mode: ${{ github.event.inputs.mode || 'live' }})"
+          subject: "POHODA import – nové objednávky: ${{ steps.new.outputs.count }}"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |

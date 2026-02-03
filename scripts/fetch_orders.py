@@ -129,15 +129,10 @@ def main():
         log("ERROR: Missing ESHOP_API_PASSWORD secret")
         sys.exit(1)
 
-    mode = os.environ.get("MODE", "live").strip().lower()
-    if mode not in ("live", "test"):
-        mode = "live"
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     url = build_url(password)
 
-    log(f"Mode = {mode}")
     log("Fetching orders from API...")
 
     raw = fetch_json(url)
@@ -157,15 +152,6 @@ def main():
 
     state = load_state()
     last_id = int(state.get("last_id_order", 0))
-
-    # TEST režim: všechny objednávky jako nové
-    if mode == "test":
-        with open(ORDERS_NEW, "w", encoding="utf-8") as f:
-            json.dump(orders, f, ensure_ascii=False, indent=2)
-
-        log("TEST MODE: new_orders.json = all orders")
-        log("State not updated.")
-        return
 
     # LIVE režim: jen nové
     new_orders = [o for o in orders if get_order_id(o) > last_id]
