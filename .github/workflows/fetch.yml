@@ -22,8 +22,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
 
-      # Artifact se může stáhnout (není problém),
-      # ale už ho NEPOUŽÍVÁME pro přepis state.json
+      # -------------------------
+      # STÁHNOUT POSLEDNÍ STATE Z ARTIFACTU
+      # -------------------------
       - name: Download previous state artifact (if exists)
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v3
@@ -33,10 +34,17 @@ jobs:
           path: _artifact_state
           if_no_artifact_found: ignore
 
-      # ✅ Použijeme pouze state.json z repozitáře
-      - name: Use repo state.json (ignore artifact)
+      # -------------------------
+      # POUŽÍT ARTIFACT STATE (pokud existuje)
+      # -------------------------
+      - name: Prepare state.json
         run: |
-          echo "Ignoring artifact state.json. Using REPO state.json."
+          if [ -f "_artifact_state/state.json" ]; then
+            echo "Using ARTIFACT state.json"
+            cp _artifact_state/state.json state.json
+          else
+            echo "No artifact found, using repo state.json (or creating default)"
+          fi
 
           if [ ! -f state.json ]; then
             echo '{"last_id_order": 0}' > state.json
@@ -45,6 +53,9 @@ jobs:
           echo "Current state.json:"
           cat state.json
 
+      # -------------------------
+      # FETCH OBJEDNÁVEK
+      # -------------------------
       - name: Fetch orders (JSON)
         env:
           ESHOP_API_PASSWORD: ${{ secrets.ESHOP_API_PASSWORD }}
@@ -54,6 +65,9 @@ jobs:
           echo "Output dir:"
           ls -lah output || true
 
+      # -------------------------
+      # DETEKCE NOVÝCH OBJEDNÁVEK
+      # -------------------------
       - name: Detect new orders count
         id: new
         run: |
@@ -79,12 +93,18 @@ jobs:
           print("new orders:", n)
           PY
 
+      # -------------------------
+      # GENEROVÁNÍ XML
+      # -------------------------
       - name: Make POHODA XML
         if: ${{ steps.new.outputs.has_new == 'true' }}
         run: |
           timeout 60 python3 scripts/make_pohoda_xml.py
           test -s output/pohoda.xml
 
+      # -------------------------
+      # NAHRÁT VÝSTUPY
+      # -------------------------
       - name: Upload outputs artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -97,6 +117,9 @@ jobs:
             output/pohoda.xml
             state.json
 
+      # -------------------------
+      # NAHRÁT NOVÝ STATE
+      # -------------------------
       - name: Upload state artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,6 +127,9 @@ jobs:
           name: pohoda-state
           path: state.json
 
+      # -------------------------
+      # EMAIL
+      # -------------------------
       - name: Send POHODA XML by email
         if: ${{ steps.new.outputs.has_new == 'true' }}
         uses: dawidd6/action-send-mail@v3
