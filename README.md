@@ -51,24 +51,50 @@ state.json
 
 ``` xml
 <?xml version="1.0" encoding="UTF-8"?>
-<dataPack id="IMPORT" version="2.0" ico="12345678">
-  <dataPackItem id="ORDER_XXXX_TIMESTAMP">
-    <order>
-      <orderHeader>
-        <orderType>receivedOrder</orderType>
-        <numberOrder>ORDER_NUMBER</numberOrder>
-        <date>2026-01-01</date>
-      </orderHeader>
-      <orderDetail>
-        <orderItem>
-          <text>Produkt A</text>
-          <quantity>2</quantity>
-          <unitPrice>100.00</unitPrice>
-        </orderItem>
-      </orderDetail>
-    </order>
-  </dataPackItem>
-</dataPack>
+<dat:dataPack
+  xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd"
+  xmlns:ord="http://www.stormware.cz/schema/version_2/order.xsd"
+  xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd"
+  id="MISDEKOR_IMPORT"
+  version="2.0"
+  ico="12345678"
+  application="misdekor-import"
+  note="Import objednávek z Eshop-rychle">
+
+  <dat:dataPackItem id="ORDER_XXXX_TIMESTAMP" version="2.0">
+    <ord:order version="2.0">
+
+      <ord:orderHeader>
+        <ord:orderType>receivedOrder</ord:orderType>
+        <ord:numberOrder>ORDER_NUMBER</ord:numberOrder>
+        <ord:date>2026-01-01</ord:date>
+        <ord:text>Objednávka z e-shopu ORDER_NUMBER</ord:text>
+
+        <ord:partnerIdentity>
+          <typ:address>
+            <typ:name>TEST CUSTOMER</typ:name>
+            <typ:street>Testovací ulice 123</typ:street>
+            <typ:city>Testovací město</typ:city>
+            <typ:zip>00000</typ:zip>
+          </typ:address>
+        </ord:partnerIdentity>
+
+      </ord:orderHeader>
+
+      <ord:orderDetail>
+        <ord:orderItem>
+          <ord:text>Produkt A</ord:text>
+          <ord:quantity>2</ord:quantity>
+          <ord:unit>ks</ord:unit>
+          <ord:homeCurrency>
+            <typ:unitPrice>100.00</typ:unitPrice>
+          </ord:homeCurrency>
+        </ord:orderItem>
+      </ord:orderDetail>
+
+    </ord:order>
+  </dat:dataPackItem>
+</dat:dataPack>
 ```
 
 ------------------------------------------------------------------------
